@@ -60,6 +60,7 @@ from live_recorder.timeutil import (
     start_of_local_day,
     utcnow,
 )
+from live_recorder.versions import tiktoklive_status, tool_version
 from live_recorder.web import ui as ui_helpers
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1150,19 +1151,15 @@ async def _system_payload(request: Request, report) -> dict:
             for engine in engines
         ]
         event_rows = [{"created_at": event.created_at, "severity": event.severity, "message": event.message} for event in events]
+    tiktok_version, _installed = tiktoklive_status()
     versions = {
         "app": __version__,
         "streamlink": await command_output([settings.streamlink_path, "--version"]),
         "yt_dlp": await command_output([settings.ytdlp_path, "--version"]),
-        "ffmpeg": await command_output([settings.ffmpeg_path, "-version"]),
-        "ffprobe": await command_output([settings.ffprobe_path, "-version"]),
+        "ffmpeg": tool_version(await command_output([settings.ffmpeg_path, "-version"])),
+        "ffprobe": tool_version(await command_output([settings.ffprobe_path, "-version"])),
+        "tiktoklive": tiktok_version,
     }
-    try:
-        import TikTokLive
-
-        versions["tiktoklive"] = str(getattr(TikTokLive, "__version__", "installed"))
-    except Exception:
-        versions["tiktoklive"] = ""
     return {
         "tz": runtime.display_timezone,
         "versions": versions,

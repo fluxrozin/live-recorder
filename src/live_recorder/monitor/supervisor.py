@@ -24,6 +24,7 @@ from live_recorder.recording.files import resolve_stored
 from live_recorder.recording.finalize import allow_new_recording, disk_free
 from live_recorder.recording.process import command_output
 from live_recorder.timeutil import utcnow
+from live_recorder.versions import tiktoklive_status, tool_version
 
 log = logging.getLogger(__name__)
 HEARTBEAT_FILE = Path("/tmp/live-recorder-worker-heartbeat")
@@ -115,16 +116,9 @@ class Supervisor:
     async def refresh_engines(self) -> None:
         streamlink = await command_output([self.settings.streamlink_path, "--version"])
         ytdlp = await command_output([self.settings.ytdlp_path, "--version"])
-        ffmpeg = await command_output([self.settings.ffmpeg_path, "-version"])
-        ffprobe = await command_output([self.settings.ffprobe_path, "-version"])
-        try:
-            import TikTokLive
-
-            tiktok_version = str(getattr(TikTokLive, "__version__", "installed"))
-            tiktok_ok = True
-        except Exception:
-            tiktok_version = ""
-            tiktok_ok = False
+        ffmpeg = tool_version(await command_output([self.settings.ffmpeg_path, "-version"]))
+        ffprobe = tool_version(await command_output([self.settings.ffprobe_path, "-version"]))
+        tiktok_version, tiktok_ok = tiktoklive_status()
         async with self.db.session() as session:
             repo = Repository(session)
             await repo.upsert_engine("streamlink", version=streamlink, available=bool(streamlink))

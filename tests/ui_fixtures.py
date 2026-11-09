@@ -530,7 +530,7 @@ def system_context(scenario: str, with_report: bool = False) -> dict:
             "app": "0.1.0",
             "streamlink": "streamlink 8.6.3",
             "yt_dlp": "2026.10.26",
-            "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+            "ffmpeg": "6.1.1-3ubuntu5",
             "ffprobe": "",
             "tiktoklive": "7.0.1",
         },
