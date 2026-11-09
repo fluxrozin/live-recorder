@@ -28,6 +28,18 @@ log = logging.getLogger(__name__)
 HEARTBEAT_FILE = Path("/tmp/live-recorder-worker-heartbeat")
 
 
+def worker_start_notice(recordings: int, comments: int) -> tuple[str, str]:
+    """起動そのものは情報。未完了の収集が残っているときだけ警告にする。"""
+    parts: list[str] = []
+    if recordings:
+        parts.append(f"録画 {recordings} 件")
+    if comments:
+        parts.append(f"コメント {comments} 件")
+    if not parts:
+        return "ワーカーを起動しました", "info"
+    return f"未完了の{'、'.join(parts)}がある状態でワーカーを起動しました", "warning"
+
+
 class Supervisor:
     def __init__(self, settings: Settings, db: Database, tc: TwitCastingClient) -> None:
         self.settings = settings
@@ -72,15 +84,18 @@ class Supervisor:
         async with self.db.session() as session:
             repo = Repository(session)
             await ensure_runtime(session)
-            await repo.add_event("worker_restart", "ワーカーを起動しました", severity="warning")
-            for job in await repo.unfinished_jobs():
+            recordings = await repo.unfinished_jobs()
+            comments = await repo.unfinished_comment_jobs()
+            message, severity = worker_start_notice(len(recordings), len(comments))
+            await repo.add_event("worker_restart", message, severity=severity)
+            for job in recordings:
                 await repo.add_gap(job.stream_session_id, "recording", job.started_at or now, now, "worker_restart")
                 if job.status != RecordingStatus.FINALIZING.value:
                     try:
                         repo.move_recording(job, RecordingStatus.RECONNECTING)
                     except Exception:
                         log.info("could not mark recording %s reconnecting", job.id, exc_info=True)
-            for job in await repo.unfinished_comment_jobs():
+            for job in comments:
                 await repo.add_gap(job.stream_session_id, "comments", job.started_at or now, now, "worker_restart")
                 if job.status != CommentJobStatus.PENDING.value:
                     try:
