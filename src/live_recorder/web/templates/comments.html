@@ -1,58 +1,126 @@
 {% extends "base.html" %}
+{% set active_nav = "comments" %}
 {% block title %}コメント{% endblock %}
 {% block content %}
-<h1>コメント</h1>
-<form class="panel" method="get">
-  <label>本文 <input name="q" value="{{ filters.q }}"></label>
-  <label>投稿者ID <input name="user_id" value="{{ filters.user_id }}"></label>
-  <label>表示名 <input name="nickname" value="{{ filters.nickname }}"></label>
-  <label>配信者
-    <select name="streamer_id">
-      <option value="">すべて</option>
-      {% for person in streamers %}
-      <option value="{{ person.id }}" {% if filters.streamer_id == person.id|string %}selected{% endif %}>{{ person.name }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>プラットフォーム
-    <select name="platform">
-      <option value="">すべて</option>
-      <option value="tiktok" {% if filters.platform == "tiktok" %}selected{% endif %}>TikTok</option>
-      <option value="twitcasting" {% if filters.platform == "twitcasting" %}selected{% endif %}>ツイキャス</option>
-    </select>
-  </label>
-  <label>配信セッションID <input name="session_id" value="{{ filters.session_id }}"></label>
-  <label>開始 <input type="date" name="start" value="{{ filters.start }}"></label>
-  <label>終了 <input type="date" name="end" value="{{ filters.end }}"></label>
-  <button type="submit">検索</button>
-</form>
-<p class="actions">
-  <a class="button" href="/comments/export?format=jsonl&{{ query }}">JSONL</a>
-  <a class="button" href="/comments/export?format=csv&{{ query }}">CSV</a>
-  <a class="button" href="/comments/export?format=txt&{{ query }}">TXT</a>
-</p>
-<p class="muted">{{ total }} 件。ページ {{ page }} / {{ pages }}。時刻は受信または投稿時刻です。</p>
-<div class="table-wrap">
-  <table>
-    <thead><tr><th>時刻</th><th>配信者</th><th>投稿者ID</th><th>表示名</th><th>本文</th><th>録画開始から</th></tr></thead>
-    <tbody>
-      {% for comment in comments %}
-      <tr>
-        <td>{{ comment.when|localtime(tz) }}</td>
-        <td><a href="/recordings/{{ comment.session_id }}">{{ comment.streamer }}</a></td>
-        <td>{{ comment.user_id }}</td>
-        <td>{{ comment.nickname }}</td>
-        <td>{{ comment.message }}</td>
-        <td>{{ comment.offset|offset }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="6">コメントはありません。</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-<p>
-  {% if page > 1 %}<a href="?page={{ page - 1 }}&{{ query }}">前へ</a>{% endif %}
-  {% if page < pages %}<a href="?page={{ page + 1 }}&{{ query }}">次へ</a>{% endif %}
-</p>
+{{ ui.page_header("コメント", "収集したコメントを検索・閲覧し、検索結果をファイルに書き出します") }}
+
+{%- set advanced_keys = ["user_id", "nickname", "streamer_id", "platform", "session_id", "start", "end"] -%}
+{%- set counter = namespace(n=0) -%}
+{%- for key in advanced_keys %}{% if filters[key] %}{% set counter.n = counter.n + 1 %}{% endif %}{% endfor -%}
+{%- set advanced_count = counter.n -%}
+{%- set chips = [] -%}
+{%- if filters.q %}{% set _ = chips.append(("本文", filters.q, "q")) %}{% endif -%}
+{%- if filters.user_id %}{% set _ = chips.append(("投稿者ID", filters.user_id, "user_id")) %}{% endif -%}
+{%- if filters.nickname %}{% set _ = chips.append(("表示名", filters.nickname, "nickname")) %}{% endif -%}
+{%- if filters.streamer_id -%}
+  {%- set person = streamers|selectattr("id", "equalto", filters.streamer_id|int)|first -%}
+  {%- set _ = chips.append(("配信者", person.name if person else "#" ~ filters.streamer_id, "streamer_id")) -%}
+{%- endif -%}
+{%- if filters.platform %}{% set _ = chips.append(("プラットフォーム", filters.platform|platform_label, "platform")) %}{% endif -%}
+{%- if filters.session_id %}{% set _ = chips.append(("セッション", "#" ~ filters.session_id, "session_id")) %}{% endif -%}
+{%- if filters.start %}{% set _ = chips.append(("開始日", filters.start ~ " 以降", "start")) %}{% endif -%}
+{%- if filters.end %}{% set _ = chips.append(("終了日", filters.end ~ " まで", "end")) %}{% endif %}
+
+<section class="c-card">
+  <form method="get" action="/comments" role="search" aria-label="コメント検索"
+        hx-get="/comments" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#results">
+    <div class="c-filter-bar">
+      <div class="c-search c-search--lg">
+        {{ ui.icon("search") }}
+        <label class="u-sr-only" for="q">コメント本文を検索</label>
+        <input class="c-input" id="q" type="search" name="q" value="{{ filters.q }}" placeholder="コメント本文を検索" autocomplete="off">
+      </div>
+      <div class="c-filter-bar__actions">
+        <button type="submit" class="c-btn c-btn--primary">検索</button>
+      </div>
+    </div>
+    <details class="c-disclosure c-filter-more"{% if advanced_count %} open{% endif %}>
+      <summary>{{ ui.icon("sliders-horizontal", "sm") }}詳細フィルター{% if advanced_count %} <span class="c-tag c-tag--accent">{{ advanced_count }} 件指定中</span>{% endif %}{{ ui.icon("chevron-down", "sm", "c-icon--chevron") }}</summary>
+      <div class="c-filter-extra">
+        <div class="c-field">
+          <label class="c-label" for="f-user">投稿者ID</label>
+          <input class="c-input c-input--mono" id="f-user" name="user_id" value="{{ filters.user_id }}" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-nick">表示名</label>
+          <input class="c-input" id="f-nick" name="nickname" value="{{ filters.nickname }}" autocomplete="off">
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-streamer">配信者</label>
+          <select class="c-select" id="f-streamer" name="streamer_id">
+            <option value="">すべて</option>
+            {% for person in streamers %}
+            <option value="{{ person.id }}"{% if filters.streamer_id == person.id|string %} selected{% endif %}>{{ person.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-platform">プラットフォーム</label>
+          <select class="c-select" id="f-platform" name="platform">
+            <option value="">すべて</option>
+            <option value="tiktok"{% if filters.platform == "tiktok" %} selected{% endif %}>TikTok</option>
+            <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>ツイキャス</option>
+          </select>
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-session">セッションID</label>
+          <input class="c-input u-num" id="f-session" name="session_id" value="{{ filters.session_id }}" inputmode="numeric" pattern="[0-9]*" autocomplete="off">
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-start">開始日</label>
+          <input class="c-input" type="date" id="f-start" name="start" value="{{ filters.start }}">
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-end">終了日</label>
+          <input class="c-input" type="date" id="f-end" name="end" value="{{ filters.end }}">
+        </div>
+      </div>
+    </details>
+  </form>
+</section>
+
+<section class="c-card c-loading-region" id="results" aria-labelledby="results-title">
+  <div class="c-toolbar">
+    <h2 class="c-toolbar__summary" id="results-title" tabindex="-1" data-results-heading>
+      <span><strong>{{ "{:,}".format(total) }}</strong> 件{% if chips %}<span class="u-subtle">（検索結果）</span>{% endif %}</span>
+      {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
+    </h2>
+    <span class="u-spacer"></span>
+    {% if total %}
+    {% call ui.menu_button("export-menu", "エクスポート", header=("現在の条件に一致する全 " if chips else "すべてのコメント ") ~ "{:,}".format(total) ~ " 件を出力します（表示中のページだけではありません）", icon_name="download") %}
+      <a class="c-menu__item" role="menuitem" href="{{ export_url(request, 'jsonl') }}" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">機械処理向け</span></a>
+      <a class="c-menu__item" role="menuitem" href="{{ export_url(request, 'csv') }}" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">Excel向け</span></a>
+      <a class="c-menu__item" role="menuitem" href="{{ export_url(request, 'txt') }}" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">閲覧向け</span></a>
+    {% endcall %}
+    {% endif %}
+  </div>
+  {% if chips %}<div class="c-toolbar">{{ ui.filter_chips(chips, "/comments") }}</div>{% endif %}
+
+  {% if comments %}
+  <div class="c-list-head" aria-hidden="true"><span>時刻</span><span>投稿者</span><span>コメント</span><span>配信 / 録画位置</span></div>
+  <ol class="c-comment-list">
+    {% for comment in comments %}
+    <li class="c-comment">
+      <span class="c-comment__time" title="{{ comment.when|localtime(tz) }}"><time datetime="{{ comment.when|iso }}">{{ comment.when|shorttime(tz) }}</time></span>
+      <div class="c-comment__author">
+        <span class="c-comment__nick u-truncate" title="{{ comment.nickname }}">{{ comment.nickname }}</span>
+        <span class="c-comment__uid u-truncate" title="{{ comment.user_id }}">{{ comment.user_id }}</span>
+      </div>
+      <p class="c-comment__body">{{ comment.message }}</p>
+      <div class="c-comment__context">
+        <a class="u-truncate" href="/recordings/{{ comment.session_id }}" title="{{ comment.streamer }} の録画 #{{ comment.session_id }}">{% if comment.platform %}{{ ui.platform(comment.platform, icon_only=True) }}{% endif %}{{ comment.streamer }}</a>
+        <span class="c-comment__offset" title="録画開始からの経過時間">録画 {{ comment.offset|offset }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+  {{ ui.pagination(page, pages, total, 50, hx=True) }}
+  {% elif chips %}
+  {% call ui.empty("search", "条件に一致するコメントはありません", "キーワードを短くするか、詳細フィルターの条件を減らしてください。") %}
+    <a class="c-btn" href="/comments">{{ ui.icon("rotate-ccw", "sm") }}条件をリセット</a>
+  {% endcall %}
+  {% else %}
+  {{ ui.empty("message-square-text", "コメントはまだありません", "コメント収集が有効な配信者の配信中に、コメントが記録されます。") }}
+  {% endif %}
+</section>
 {% endblock %}

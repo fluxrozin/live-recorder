@@ -1,50 +1,155 @@
 {% extends "base.html" %}
-{% block title %}概況{% endblock %}
+{% set active_nav = "dashboard" %}
+{% block title %}ダッシュボード{% endblock %}
 {% block content %}
-<h1>概況</h1>
-<section class="grid">
-  <article class="card"><span class="muted">監視対象</span><strong>{{ stats.streamers }}</strong></article>
-  <article class="card"><span class="muted">配信中</span><strong>{{ stats.live }}</strong></article>
-  <article class="card"><span class="muted">録画中</span><strong>{{ stats.recording }}</strong></article>
-  <article class="card"><span class="muted">コメント収集中</span><strong>{{ stats.collecting }}</strong></article>
-  <article class="card"><span class="muted">本日の配信</span><strong>{{ stats.sessions_today }}</strong></article>
-  <article class="card"><span class="muted">本日のコメント</span><strong>{{ stats.comments_today }}</strong></article>
-  <article class="card"><span class="muted">録画の合計</span><strong>{{ stats.total_bytes|bytes }}</strong></article>
-  <article class="card"><span class="muted">空き容量</span><strong>{{ free|bytes }}</strong><span class="muted">/ {{ total|bytes }}</span></article>
+{{ ui.page_header("ダッシュボード", "監視・録画・コメント収集の稼働状況を確認します") }}
+
+{%- set used_pct = percent(used, total) -%}
+{%- set storage_tone = "danger" if (free is not none and free < min_free) else ("warning" if (used_pct is not none and used_pct >= 85) else "") -%}
+{%- if worker.state == "error" -%}
+  {%- set overall = ("danger", "ワーカーが停止しているか、応答がありません") -%}
+{%- elif worker.state != "ok" -%}
+  {%- set overall = ("warning", "ワーカーの状態を確認できません") -%}
+{%- elif storage_tone == "danger" -%}
+  {%- set overall = ("danger", "空き容量が最低空き容量を下回っています。新しい録画は開始されません") -%}
+{%- elif errors -%}
+  {%- set overall = ("warning", "直近24時間に警告またはエラーがあります") -%}
+{%- else -%}
+  {%- set overall = ("ok", "すべて正常に稼働しています") -%}
+{%- endif %}
+
+<section class="c-health-strip{% if overall[0] != 'ok' %} c-health-strip--{{ overall[0] }}{% endif %}" aria-label="システムの概況">
+  <span class="c-health-strip__item">
+    {{ ui.status("health", "ok" if overall[0] == "ok" else ("error" if overall[0] == "danger" else "warning")) }}
+    <strong>{{ overall[1] }}</strong>
+  </span>
+  <span class="c-health-strip__sep u-hide-sm" aria-hidden="true"></span>
+  <span class="c-health-strip__item">ワーカー {{ ui.status("health", worker.state) }}<span class="u-muted">{{ worker.last_seen_at|ago if worker.last_seen_at else "応答記録なし" }}</span></span>
+  <span class="c-health-strip__item">最終監視 {{ ui.time(last_checked, tz) }}</span>
+  <span class="c-health-strip__item">警告・エラー（24時間） <strong class="u-num">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</strong></span>
 </section>
-<h2>直近の配信</h2>
-<div class="table-wrap">
-  <table>
-    <thead><tr><th>配信者</th><th>プラットフォーム</th><th>タイトル</th><th>検知</th><th>録画</th></tr></thead>
-    <tbody>
-      {% for card in cards %}
-      <tr>
-        <td><a href="/recordings/{{ card.id }}">{{ card.name }}</a></td>
-        <td>{{ card.platform|platform_label }}</td>
-        <td>{{ card.title }}</td>
-        <td>{{ card.detected_at|localtime(tz) }}</td>
-        <td><span class="pill {{ card.status }}">{{ card.status|rec_label }}</span></td>
-      </tr>
+
+<section class="c-metrics" aria-label="主要指標">
+  {{ ui.metric("監視対象", stats.streamers, "radio-tower", hint="監視中 " ~ monitored ~ " / 登録 " ~ stats.streamers) }}
+  {{ ui.metric("現在配信中", stats.live, "radio", hint="監視中のアカウントのみ", state="live" if stats.live else "") }}
+  {{ ui.metric("現在録画中", stats.recording, "video", hint="開始中・再接続中を含む", state="active" if stats.recording else "") }}
+  {{ ui.metric("コメント収集中", stats.collecting, "message-circle", hint="接続中・再接続中を含む", state="active" if stats.collecting else "") }}
+</section>
+
+<section class="c-stat-strip" aria-label="補足指標">
+  <div class="c-stat"><span class="c-stat__label">本日の配信</span><span class="c-stat__value">{{ "{:,}".format(stats.sessions_today) }}</span></div>
+  <div class="c-stat"><span class="c-stat__label">本日のコメント</span><span class="c-stat__value">{{ "{:,}".format(stats.comments_today) }}</span></div>
+  <div class="c-stat"><span class="c-stat__label">録画総容量</span><span class="c-stat__value">{{ stats.total_bytes|bytes }}</span></div>
+  <div class="c-stat"><span class="c-stat__label">NAS空き容量</span><span class="c-stat__value">{{ free|bytes if free is not none else "取得不可" }}</span></div>
+</section>
+
+<div class="l-grid-main">
+  <div class="u-stack-lg">
+    <section class="c-card" aria-labelledby="active-title">
+      <div id="active-sessions" class="c-loading-region" hx-get="/partials/active-sessions" hx-trigger="every 30s, lr:refresh" hx-swap="innerHTML" data-poll="30">
+        {% include "partials/active_sessions.html" %}
+      </div>
+    </section>
+
+    <section class="c-card" aria-labelledby="recent-title">
+      <header class="c-card__header">
+        <h2 class="c-card__title" id="recent-title">{{ ui.icon("film") }}最近の録画</h2>
+        <div class="c-card__actions"><a class="c-btn c-btn--ghost c-btn--sm" href="/recordings">すべて表示{{ ui.icon("chevron-right", "sm") }}</a></div>
+      </header>
+      {% if cards %}
+      <div class="c-table-wrap">
+        <table class="c-table c-table--compact c-table--stack">
+          <thead>
+            <tr><th scope="col">配信</th><th scope="col">開始</th><th scope="col">録画</th><th scope="col" class="is-actions"><span class="u-sr-only">詳細</span></th></tr>
+          </thead>
+          <tbody>
+            {% for card in cards %}
+            <tr>
+              <td class="is-fill is-span">
+                <div class="c-table__cell-stack">
+                  <span class="u-row">
+                    <a class="c-table__link u-truncate" href="/recordings/{{ card.id }}">{{ card.name }}</a>
+                    {{ ui.platform(card.platform) }}
+                  </span>
+                  <span class="c-table__secondary u-truncate" title="{{ card.title or '' }}">{{ card.title or "タイトルなし" }}</span>
+                </div>
+              </td>
+              <td class="u-nowrap" data-label="開始">{{ ui.time(card.detected_at, tz) }}</td>
+              <td data-label="録画">{{ ui.status("rec", card.status) }}</td>
+              <td class="is-actions u-hide-sm"><a class="c-icon-btn c-icon-btn--sm" href="/recordings/{{ card.id }}" aria-label="{{ card.name }} の録画詳細">{{ ui.icon("chevron-right") }}</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
       {% else %}
-      <tr><td colspan="5">まだ履歴がありません。</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+      {{ ui.empty("film", "まだ録画履歴がありません", "配信者を登録して監視を有効にすると、配信開始時に自動で録画されます。", compact=True) }}
+      {% endif %}
+    </section>
+  </div>
+
+  <div class="u-stack-lg">
+    <section class="c-card" aria-labelledby="storage-title">
+      <header class="c-card__header">
+        <h2 class="c-card__title" id="storage-title">{{ ui.icon("hard-drive") }}ストレージ</h2>
+      </header>
+      <div class="c-card__body c-storage">
+        {% if total is not none %}
+        <div class="c-storage__figures">
+          <span class="c-storage__percent">{{ used_pct }}<span class="u-muted u-small">% 使用</span></span>
+          <span class="u-small u-muted u-num">{{ used|bytes }} / {{ total|bytes }}</span>
+        </div>
+        <progress class="c-progress{% if storage_tone %} c-progress--{{ storage_tone }}{% endif %}" value="{{ used }}" max="{{ total }}" aria-label="NAS使用率 {{ used_pct }}%">{{ used_pct }}%</progress>
+        <dl class="c-storage__legend">
+          <div><dt>使用</dt><dd>{{ used|bytes }}</dd></div>
+          <div><dt>空き</dt><dd>{{ free|bytes }}</dd></div>
+          <div><dt>総容量</dt><dd>{{ total|bytes }}</dd></div>
+        </dl>
+        {% if storage_tone == "danger" %}
+        {{ ui.alert("danger", text="空き容量が最低空き容量（" ~ (min_free|bytes) ~ "）を下回っています。") }}
+        {% elif storage_tone == "warning" %}
+        {{ ui.alert("warning", text="使用率が85%を超えています。保存期限や不要な録画を確認してください。") }}
+        {% else %}
+        <p class="u-caption">最低空き容量 {{ min_free|bytes }} を下回ると新しい録画を開始しません。</p>
+        {% endif %}
+        {% else %}
+        {{ ui.alert("warning", title="容量を取得できません", text="録画保存先にアクセスできません。ボリュームのマウントを確認してください。") }}
+        {% endif %}
+      </div>
+      {% if by_streamer %}
+      <div class="c-card__body">
+        <h3 class="u-caption" id="by-streamer-title">配信者別の録画容量</h3>
+        <ul class="c-bar-list" aria-labelledby="by-streamer-title">
+          {% for platform_code, name, size in by_streamer[:5] %}
+          <li class="c-bar-list__item">
+            <div class="c-bar-list__head"><span class="u-truncate">{{ name }} <span class="u-subtle">· {{ platform_code|platform_label }}</span></span><span class="u-num u-muted">{{ size|bytes }}</span></div>
+            <progress class="c-progress c-progress--sm c-progress--muted" value="{{ size }}" max="{{ stats.total_bytes or 1 }}" aria-label="{{ name }} {{ size|bytes }}"></progress>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </section>
+
+    {% if errors %}
+    <section class="c-card" aria-labelledby="errors-title">
+      <header class="c-card__header">
+        <h2 class="c-card__title" id="errors-title">{{ ui.icon("triangle-alert") }}直近の警告・エラー <span class="c-count c-count--warning">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</span></h2>
+        <div class="c-card__actions"><a class="c-btn c-btn--ghost c-btn--sm" href="/system#events">履歴{{ ui.icon("chevron-right", "sm") }}</a></div>
+      </header>
+      <ul class="c-event-list">
+        {% for event in errors %}
+        <li class="c-event c-event--compact">
+          <span class="c-event__time" title="{{ event.created_at|localtime(tz) }}">{{ event.created_at|shorttime(tz) }}</span>
+          <div class="c-event__msg u-stack-sm">
+            {{ ui.status("severity", event.severity) }}
+            <span>{{ event.message|truncate(160) }}</span>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </div>
 </div>
-<h2>配信者別の容量</h2>
-<ul>
-  {% for platform, name, size in by_streamer %}
-  <li>{{ platform|platform_label }} / {{ name }}: {{ size|bytes }}</li>
-  {% else %}
-  <li class="muted">集計できるファイルはまだありません。</li>
-  {% endfor %}
-</ul>
-<h2>直近の警告とエラー</h2>
-<ul>
-  {% for event in errors %}
-  <li>{{ event.created_at|localtime(tz) }} [{{ event.severity }}] {{ event.message }}</li>
-  {% else %}
-  <li class="muted">直近の警告はありません。</li>
-  {% endfor %}
-</ul>
 {% endblock %}

@@ -1,57 +1,184 @@
 {% extends "base.html" %}
+{% set active_nav = "settings" %}
 {% block title %}設定{% endblock %}
+
+{% macro number_setting(name, label, value, hint, unit, min=None, max=None, step=None) -%}
+<div class="c-setting">
+  <div class="c-setting__text">
+    <label class="c-setting__label" for="s-{{ name }}">{{ label }}</label>
+    <p class="c-hint" id="s-{{ name }}-hint">{{ hint }}</p>
+  </div>
+  <div class="c-setting__control">
+    <div class="c-input-group">
+      <input class="c-input u-num" type="number" id="s-{{ name }}" name="{{ name }}" value="{{ value }}"{% if min is not none %} min="{{ min }}"{% endif %}{% if max is not none %} max="{{ max }}"{% endif %}{% if step is not none %} step="{{ step }}"{% endif %} required inputmode="numeric" aria-describedby="s-{{ name }}-hint">
+      <span class="c-input-group__addon">{{ unit }}</span>
+    </div>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro switch_setting(name, label, checked, hint) -%}
+<div class="c-setting c-setting--inline">
+  <div class="c-setting__text">
+    <label class="c-setting__label" for="s-{{ name }}">{{ label }}</label>
+    <p class="c-hint" id="s-{{ name }}-hint">{{ hint }}</p>
+  </div>
+  <div class="c-setting__control">
+    <input class="c-switch-input" type="checkbox" role="switch" id="s-{{ name }}" name="{{ name }}"{% if checked %} checked{% endif %} aria-describedby="s-{{ name }}-hint">
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro panel_header(id, title, en, description) -%}
+<header class="c-card__header">
+  <div class="u-stack-sm">
+    <h2 class="c-card__title" id="{{ id }}-title">{{ title }} <span class="u-subtle u-small">{{ en }}</span></h2>
+    <p class="c-card__subtitle">{{ description }}</p>
+  </div>
+</header>
+{%- endmacro %}
+
 {% block content %}
-<h1>設定</h1>
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-<p class="muted">この画面の項目は保存後、ワーカーの次の監視周期で反映されます。保存先、ポート、APIキーは環境変数のため、変更にはコンテナの再起動が必要です。</p>
-<form class="card" method="post">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>監視間隔（秒、30以上） <input name="monitor_interval_seconds" type="number" min="30" value="{{ runtime.monitor_interval_seconds }}"></label>
-  <label>同時録画上限 <input name="max_concurrent_recordings" type="number" min="1" max="20" value="{{ runtime.max_concurrent_recordings }}"></label>
-  <label>録画品質
-    <select name="recording_quality">
-      {% for quality in ["best", "high", "medium"] %}
-      <option value="{{ quality }}" {% if runtime.recording_quality == quality %}selected{% endif %}>{{ quality }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>最低空き容量（GiB） <input name="min_free_gib" type="number" min="0" step="1" value="{{ (runtime.min_free_bytes / 1073741824)|round(0, 'floor')|int }}"></label>
-  <label>録画の保存期限（日、0は無期限） <input name="retention_days" type="number" min="0" value="{{ runtime.retention_days }}"></label>
-  <label><input type="checkbox" name="auto_delete_enabled" {% if runtime.auto_delete_enabled %}checked{% endif %}> 期限を過ぎた録画ファイルを自動削除する</label>
-  <fieldset>
-    <legend>TikTok 録画エンジンの順序</legend>
-    {% for index in [1, 2, 3] %}
-    <label>{{ index }}
-      <select name="engine_{{ index }}">
-        <option value="">使わない</option>
-        {% for engine in ["streamlink", "yt-dlp", "tiktoklive"] %}
-        <option value="{{ engine }}" {% if runtime.tiktok_engine_order|length >= index and runtime.tiktok_engine_order[index - 1] == engine %}selected{% endif %}>{{ engine }}</option>
-        {% endfor %}
-      </select>
-    </label>
+{{ ui.page_header("設定", "監視・録画・コメント収集の動作を設定します。保存した値は、ワーカーの次の監視周期で反映されます。") }}
+
+{% if error %}
+{{ ui.alert("danger", title="設定を保存できませんでした", text=error ~ "。入力内容は保持されています。修正してから再度保存してください。", role="alert") }}
+{% endif %}
+
+{%- set sections = [
+  ("general", "全般", "General", "settings"),
+  ("recording", "録画", "Recording", "video"),
+  ("tiktok", "TikTok", "TikTok", "music-2"),
+  ("comments", "コメント", "Comments", "message-circle"),
+  ("advanced", "詳細", "Advanced", "sliders-horizontal"),
+  ("environment", "環境", "Environment", "server"),
+] %}
+
+<form method="post" action="/settings" class="l-settings" data-tabs data-tabs-hash data-dirty-form data-busy aria-label="設定">
+  {{ ui.csrf_input() }}
+  <div class="c-settings-nav" role="tablist" aria-label="設定カテゴリ" aria-orientation="vertical" hidden>
+    {% for key, label, en, icon_name in sections %}
+    <button type="button" class="c-tab" role="tab" id="tab-{{ key }}" aria-controls="settings-{{ key }}" aria-selected="{{ 'true' if loop.first else 'false' }}">
+      {{ ui.icon(icon_name) }}<span>{{ label }}</span>
+      <span class="c-dirty-dot" data-dirty-dot="settings-{{ key }}" hidden><span class="u-sr-only">（未保存の変更あり）</span></span>
+    </button>
     {% endfor %}
-  </fieldset>
-  <label><input type="checkbox" name="comments_globally_enabled" {% if runtime.comments_globally_enabled %}checked{% endif %}> コメント収集を全体で有効にする</label>
-  <label>ログレベル
-    <select name="log_level">
-      {% for level in ["DEBUG", "INFO", "WARNING", "ERROR"] %}
-      <option {% if runtime.log_level == level %}selected{% endif %}>{{ level }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>表示タイムゾーン <input name="display_timezone" value="{{ runtime.display_timezone }}"></label>
-  <label>コメント保存期限（日、0は無期限） <input name="comment_retention_days" type="number" min="0" value="{{ runtime.comment_retention_days }}"></label>
-  <label><input type="checkbox" name="auto_export_on_complete" {% if runtime.auto_export_on_complete %}checked{% endif %}> 収集完了時に JSONL を自動書き出しする</label>
-  <label>再接続回数 <input name="reconnect_max_attempts" type="number" min="0" max="30" value="{{ runtime.reconnect_max_attempts }}"></label>
-  <label>ツイキャスコメント間隔（秒） <input name="comment_poll_seconds" type="number" min="5" max="120" value="{{ runtime.comment_poll_seconds }}"></label>
-  <button type="submit">保存</button>
+  </div>
+
+  <div class="c-settings-panels">
+    <section class="c-card" id="settings-general" role="tabpanel" aria-labelledby="settings-general-title">
+      {{ panel_header("settings-general", "全般", "General", "監視の頻度と表示に関する設定です。") }}
+      {{ number_setting("monitor_interval_seconds", "監視間隔", runtime.monitor_interval_seconds, "各配信者の配信状態を確認する間隔です。30秒以上で指定します。短くするとプラットフォームへの問い合わせが増えます。", "秒", min=30) }}
+      {{ number_setting("max_concurrent_recordings", "同時録画上限", runtime.max_concurrent_recordings, "同時に録画する配信の最大数です（1〜20）。NAS の性能に合わせて設定します。", "件", min=1, max=20) }}
+      <div class="c-setting">
+        <div class="c-setting__text">
+          <label class="c-setting__label" for="s-display_timezone">表示タイムゾーン</label>
+          <p class="c-hint" id="s-display_timezone-hint">画面と書き出しファイルの時刻表示に使います。IANA 形式（例: Asia/Tokyo）で指定します。</p>
+        </div>
+        <div class="c-setting__control">
+          <input class="c-input" id="s-display_timezone" name="display_timezone" value="{{ runtime.display_timezone }}" list="tz-options" required autocomplete="off" spellcheck="false" aria-describedby="s-display_timezone-hint">
+          <datalist id="tz-options">
+            {% for zone in ["Asia/Tokyo", "UTC", "Asia/Seoul", "Asia/Shanghai", "Asia/Taipei", "Europe/London", "America/New_York", "America/Los_Angeles"] %}<option value="{{ zone }}"></option>{% endfor %}
+          </datalist>
+        </div>
+      </div>
+    </section>
+
+    <section class="c-card" id="settings-recording" role="tabpanel" aria-labelledby="settings-recording-title">
+      {{ panel_header("settings-recording", "録画", "Recording", "録画品質と、保存容量の管理に関する設定です。") }}
+      <div class="c-setting">
+        <div class="c-setting__text">
+          <label class="c-setting__label" for="s-recording_quality">録画品質</label>
+          <p class="c-hint" id="s-recording_quality-hint">配信で利用できる画質のうち、どれを録画するかを指定します。</p>
+        </div>
+        <div class="c-setting__control">
+          <select class="c-select" id="s-recording_quality" name="recording_quality" aria-describedby="s-recording_quality-hint">
+            {% for quality, label in [("best", "best（最高画質）"), ("high", "high（高画質）"), ("medium", "medium（標準）")] %}
+            <option value="{{ quality }}"{% if runtime.recording_quality == quality %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      {{ number_setting("min_free_gib", "最低空き容量", (runtime.min_free_bytes / 1073741824)|round(0, 'floor')|int, "保存先の空き容量がこの値を下回ると、新しい録画を開始しません。", "GiB", min=0, step=1) }}
+      {{ number_setting("retention_days", "録画の保存期限", runtime.retention_days, "録画ファイルを保存しておく日数です。0 は無期限です。", "日", min=0) }}
+      {{ switch_setting("auto_delete_enabled", "期限切れ録画の自動削除", runtime.auto_delete_enabled, "保存期限を過ぎた録画ファイルを自動で削除します。") }}
+    </section>
+
+    <section class="c-card" id="settings-tiktok" role="tabpanel" aria-labelledby="settings-tiktok-title">
+      {{ panel_header("settings-tiktok", "TikTok", "TikTok", "TikTok LIVE の録画方法に関する設定です。") }}
+      <div class="c-setting">
+        <div class="c-setting__text">
+          <span class="c-setting__label" id="s-engines-label">録画エンジンの優先順位</span>
+          <p class="c-hint" id="s-engines-hint">上から順に試し、失敗したときは次のエンジンに切り替えます。同じエンジンは重複して選べません。「使わない」を選ぶと候補から外れます。</p>
+        </div>
+        <div class="c-setting__control">
+          <div class="c-engine-order" role="group" aria-labelledby="s-engines-label" aria-describedby="s-engines-hint">
+            {% for index in [1, 2, 3] %}
+            <div class="c-engine-order__row">
+              <label class="c-engine-order__rank" for="s-engine_{{ index }}">{{ index }}位</label>
+              <select class="c-select" id="s-engine_{{ index }}" name="engine_{{ index }}">
+                <option value="">使わない</option>
+                {% for engine in ["streamlink", "yt-dlp", "tiktoklive"] %}
+                <option value="{{ engine }}"{% if runtime.tiktok_engine_order|length >= index and runtime.tiktok_engine_order[index - 1] == engine %} selected{% endif %}>{{ engine }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="c-card" id="settings-comments" role="tabpanel" aria-labelledby="settings-comments-title">
+      {{ panel_header("settings-comments", "コメント", "Comments", "コメント収集と、収集したコメントの保存に関する設定です。") }}
+      {{ switch_setting("comments_globally_enabled", "コメント収集を有効にする", runtime.comments_globally_enabled, "OFF にすると、配信者ごとの設定にかかわらずコメントを収集しません。") }}
+      {{ number_setting("comment_retention_days", "コメントの保存期限", runtime.comment_retention_days, "コメントを保存しておく日数です。0 は無期限です。", "日", min=0) }}
+      {{ switch_setting("auto_export_on_complete", "完了時に自動エクスポート", runtime.auto_export_on_complete, "コメント収集が完了したとき、JSONL ファイルを自動で書き出します。") }}
+      {{ number_setting("comment_poll_seconds", "ツイキャスのコメント取得間隔", runtime.comment_poll_seconds, "ツイキャス API からコメントを取得する間隔です（5〜120秒）。", "秒", min=5, max=120) }}
+    </section>
+
+    <section class="c-card" id="settings-advanced" role="tabpanel" aria-labelledby="settings-advanced-title">
+      {{ panel_header("settings-advanced", "詳細", "Advanced", "通常は変更する必要のない設定です。") }}
+      {{ number_setting("reconnect_max_attempts", "再接続回数", runtime.reconnect_max_attempts, "録画やコメント収集が切断されたときに再接続を試みる上限回数です（0〜30）。", "回", min=0, max=30) }}
+      <div class="c-setting">
+        <div class="c-setting__text">
+          <label class="c-setting__label" for="s-log_level">ログレベル</label>
+          <p class="c-hint" id="s-log_level-hint">ワーカーが出力するログの詳しさです。調査時以外は INFO を推奨します。</p>
+        </div>
+        <div class="c-setting__control">
+          <select class="c-select" id="s-log_level" name="log_level" aria-describedby="s-log_level-hint">
+            {% for level in ["DEBUG", "INFO", "WARNING", "ERROR"] %}
+            <option value="{{ level }}"{% if runtime.log_level == level %} selected{% endif %}>{{ level }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section class="c-card" id="settings-environment" role="tabpanel" aria-labelledby="settings-environment-title">
+      {{ panel_header("settings-environment", "環境", "Environment", "環境変数で設定される値です。この画面からは変更できません。") }}
+      <div class="c-card__body u-stack">
+        {{ ui.alert("neutral", text="これらの値を変更するには、.env または compose.yaml の環境変数を更新し、コンテナを再起動してください。秘密情報の値は表示しません。") }}
+        <dl class="c-props">
+          <dt>録画保存先 <span class="c-tag">再起動が必要</span></dt><dd class="u-mono">{{ env.recordings_dir }}</dd>
+          <dt>Webポート <span class="c-tag">再起動が必要</span></dt><dd class="u-num">{{ env.web_port }}</dd>
+          <dt>ツイキャス API 認証 <span class="c-tag">再起動が必要</span></dt>
+          <dd>{% if env.twitcasting %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
+          <dt>TikTok 署名キー <span class="c-tag">再起動が必要</span></dt>
+          <dd>{% if env.sign_key %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
+          <dt>Cookie Secure <span class="c-tag">再起動が必要</span></dt>
+          <dd>{% if env.cookie_secure %}<span class="c-status c-status--success">{{ ui.icon("lock") }}有効</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}無効（HTTP 接続向け）</span>{% endif %}</dd>
+        </dl>
+      </div>
+    </section>
+
+    <div class="c-savebar" data-savebar>
+      <p class="c-savebar__status" aria-live="polite">{{ ui.icon("info", "sm") }}<span data-savebar-text>変更はありません</span></p>
+      <div class="c-savebar__actions">
+        <button type="reset" class="c-btn c-btn--ghost">変更を破棄</button>
+        <button type="submit" class="c-btn c-btn--primary">設定を保存</button>
+      </div>
+    </div>
+  </div>
 </form>
-<section class="panel">
-  <h2>再起動が必要な値</h2>
-  <p>保存先: {{ env.recordings_dir }}</p>
-  <p>Webポート: {{ env.web_port }}</p>
-  <p>ツイキャス認証: {{ "設定済み" if env.twitcasting else "未設定" }}</p>
-  <p>TikTok署名キー: {{ "設定済み" if env.sign_key else "未設定" }}</p>
-  <p>Cookie Secure: {{ "有効" if env.cookie_secure else "無効" }}</p>
-</section>
 {% endblock %}

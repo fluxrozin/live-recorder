@@ -1,67 +1,132 @@
 {% extends "base.html" %}
+{% set active_nav = "recordings" %}
 {% block title %}録画履歴{% endblock %}
 {% block content %}
-<h1>録画履歴</h1>
-<p class="muted">この画面に動画再生機能はありません。ファイルはダウンロードして外部のプレイヤーで再生します。</p>
-<form class="panel" method="get">
-  <label>配信者
-    <select name="streamer_id">
-      <option value="">すべて</option>
-      {% for person in streamers %}
-      <option value="{{ person.id }}" {% if filters.streamer_id == person.id|string %}selected{% endif %}>{{ person.name }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>プラットフォーム
-    <select name="platform">
-      <option value="">すべて</option>
-      <option value="tiktok" {% if filters.platform == "tiktok" %}selected{% endif %}>TikTok</option>
-      <option value="twitcasting" {% if filters.platform == "twitcasting" %}selected{% endif %}>ツイキャス</option>
-    </select>
-  </label>
-  <label>録画状態
-    <select name="status">
-      <option value="">すべて</option>
-      {% for code in ["RECORDING", "COMPLETED", "PARTIAL", "FAILED", "CANCELLED"] %}
-      <option value="{{ code }}" {% if filters.status == code %}selected{% endif %}>{{ code|rec_label }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>開始 <input type="date" name="start" value="{{ filters.start }}"></label>
-  <label>終了 <input type="date" name="end" value="{{ filters.end }}"></label>
-  <button type="submit">検索</button>
-</form>
-<p class="muted">{{ total }} 件中 {{ page }} / {{ pages }} ページ</p>
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th>配信者</th><th>プラットフォーム</th><th>タイトル</th><th>開始</th><th>終了</th>
-        <th>時間</th><th>ファイル</th><th>サイズ</th><th>コメント</th><th>状態</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for card in cards %}
-      <tr>
-        <td><a href="/recordings/{{ card.id }}">{{ card.name }}</a></td>
-        <td>{{ card.platform|platform_label }}</td>
-        <td>{{ card.title }}</td>
-        <td>{{ card.started|localtime(tz) }}</td>
-        <td>{{ card.finished|localtime(tz) }}</td>
-        <td>{{ card.duration_ms|offset }}</td>
-        <td>{{ card.files }}</td>
-        <td>{{ card.size|bytes }}</td>
-        <td><a href="/comments?session_id={{ card.id }}">{{ card.comments }}</a></td>
-        <td><span class="pill {{ card.status }}">{{ card.status|rec_label }}</span></td>
-      </tr>
-      {% else %}
-      <tr><td colspan="10">該当する履歴はありません。</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-<p>
-  {% if page > 1 %}<a href="?page={{ page - 1 }}&streamer_id={{ filters.streamer_id }}&platform={{ filters.platform }}&status={{ filters.status }}&start={{ filters.start }}&end={{ filters.end }}">前へ</a>{% endif %}
-  {% if page < pages %}<a href="?page={{ page + 1 }}&streamer_id={{ filters.streamer_id }}&platform={{ filters.platform }}&status={{ filters.status }}&start={{ filters.start }}&end={{ filters.end }}">次へ</a>{% endif %}
-</p>
+{{ ui.page_header("録画履歴", "録画セッションの検索と、録画ファイルのダウンロード・管理を行います。動画はダウンロードして外部プレイヤーで再生します。") }}
+
+{%- set status_codes = ["RECORDING", "COMPLETED", "PARTIAL", "FAILED", "CANCELLED"] -%}
+{%- set chips = [] -%}
+{%- if filters.streamer_id -%}
+  {%- set person = streamers|selectattr("id", "equalto", filters.streamer_id|int)|first -%}
+  {%- set _ = chips.append(("配信者", person.name if person else "#" ~ filters.streamer_id, "streamer_id")) -%}
+{%- endif -%}
+{%- if filters.platform %}{% set _ = chips.append(("プラットフォーム", filters.platform|platform_label, "platform")) %}{% endif -%}
+{%- if filters.status %}{% set _ = chips.append(("録画状態", filters.status|rec_label, "status")) %}{% endif -%}
+{%- if filters.start %}{% set _ = chips.append(("開始日", filters.start ~ " 以降", "start")) %}{% endif -%}
+{%- if filters.end %}{% set _ = chips.append(("終了日", filters.end ~ " まで", "end")) %}{% endif %}
+
+<section class="c-card" aria-labelledby="rec-results-title">
+  <form method="get" action="/recordings" role="search" aria-label="録画履歴の絞り込み">
+    <div class="c-filter-bar">
+      <div class="c-field">
+        <label class="c-label" for="f-streamer">配信者</label>
+        <select class="c-select" id="f-streamer" name="streamer_id">
+          <option value="">すべて</option>
+          {% for person in streamers %}
+          <option value="{{ person.id }}"{% if filters.streamer_id == person.id|string %} selected{% endif %}>{{ person.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="c-field">
+        <label class="c-label" for="f-status">録画状態</label>
+        <select class="c-select" id="f-status" name="status">
+          <option value="">すべて</option>
+          {% for code in status_codes %}
+          <option value="{{ code }}"{% if filters.status == code %} selected{% endif %}>{{ code|rec_label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="c-field">
+        <label class="c-label" for="f-platform">プラットフォーム</label>
+        <select class="c-select" id="f-platform" name="platform">
+          <option value="">すべて</option>
+          <option value="tiktok"{% if filters.platform == "tiktok" %} selected{% endif %}>TikTok</option>
+          <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>ツイキャス</option>
+        </select>
+      </div>
+      <div class="c-filter-bar__actions">
+        <button type="submit" class="c-btn c-btn--primary">{{ ui.icon("search", "sm") }}検索</button>
+      </div>
+    </div>
+    <details class="c-disclosure c-filter-more"{% if filters.start or filters.end %} open{% endif %}>
+      <summary>{{ ui.icon("calendar", "sm") }}期間で絞り込む{% if filters.start or filters.end %} <span class="c-tag c-tag--accent">指定中</span>{% endif %}{{ ui.icon("chevron-down", "sm", "c-icon--chevron") }}</summary>
+      <div class="c-filter-extra">
+        <div class="c-field">
+          <label class="c-label" for="f-start">開始日</label>
+          <input class="c-input" type="date" id="f-start" name="start" value="{{ filters.start }}">
+        </div>
+        <div class="c-field">
+          <label class="c-label" for="f-end">終了日</label>
+          <input class="c-input" type="date" id="f-end" name="end" value="{{ filters.end }}">
+        </div>
+      </div>
+    </details>
+  </form>
+
+  <div class="c-toolbar">
+    <h2 class="c-toolbar__summary" id="rec-results-title">
+      <span><strong>{{ "{:,}".format(total) }}</strong> 件</span>
+      {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
+    </h2>
+    {{ ui.filter_chips(chips, "/recordings") }}
+  </div>
+
+  {% if cards %}
+  <div class="c-table-wrap">
+    <table class="c-table c-table--stack">
+      <thead>
+        <tr>
+          <th scope="col">配信</th>
+          <th scope="col">録画日時</th>
+          <th scope="col" class="is-num u-hide-lg">録画時間</th>
+          <th scope="col" class="is-num">サイズ</th>
+          <th scope="col" class="is-num u-hide-lg">コメント</th>
+          <th scope="col">状態</th>
+          <th scope="col" class="is-actions u-hide-sm"><span class="u-sr-only">詳細</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for card in cards %}
+        <tr>
+          <td class="is-fill">
+            <div class="c-table__cell-stack">
+              <span class="u-row">
+                <a class="c-table__link u-truncate" href="/recordings/{{ card.id }}">{{ card.name }}</a>
+                {{ ui.platform(card.platform) }}
+              </span>
+              <span class="c-table__secondary u-truncate" title="{{ card.title or '' }}">{{ card.title or "タイトルなし" }}</span>
+            </div>
+          </td>
+          <td data-label="録画日時" class="u-nowrap">
+            <div class="c-table__cell-stack">
+              {{ ui.time(card.started, tz) }}
+              <span class="c-table__secondary">〜 {{ card.finished|shorttime(tz) if card.finished else "継続中" }}</span>
+            </div>
+          </td>
+          <td class="is-num u-hide-lg" data-label="録画時間">{{ card.duration_ms|duration }}</td>
+          <td class="is-num" data-label="サイズ">
+            <div class="c-table__cell-stack">
+              <span>{{ card.size|bytes if card.files else "—" }}</span>
+              <span class="c-table__secondary">{{ card.files }} ファイル</span>
+            </div>
+          </td>
+          <td class="is-num u-hide-lg" data-label="コメント">
+            {% if card.comments %}<a href="/comments?session_id={{ card.id }}" aria-label="コメント {{ card.comments }} 件を表示">{{ "{:,}".format(card.comments) }}</a>{% else %}<span class="u-subtle">0</span>{% endif %}
+          </td>
+          <td class="is-corner">{{ ui.status("rec", card.status) }}</td>
+          <td class="is-actions u-hide-sm"><a class="c-icon-btn c-icon-btn--sm" href="/recordings/{{ card.id }}" aria-label="{{ card.name }} の録画詳細">{{ ui.icon("chevron-right") }}</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.pagination(page, pages, total, 20) }}
+  {% elif chips %}
+  {% call ui.empty("search", "条件に一致する録画はありません", "条件を変更するか、リセットしてすべての録画を表示してください。") %}
+    <a class="c-btn" href="/recordings">{{ ui.icon("rotate-ccw", "sm") }}条件をリセット</a>
+  {% endcall %}
+  {% else %}
+  {{ ui.empty("film", "まだ録画履歴がありません", "監視中の配信者が配信を開始すると、自動で録画され、ここに表示されます。") }}
+  {% endif %}
+</section>
 {% endblock %}

@@ -1,0 +1,196 @@
+/*
+ * Live Recorder design tokens.
+ * ダークを既定とし、[data-theme="light"] で上書きする。各画面は値を直書きせずこのトークンだけを参照する。
+ */
+:root {
+  color-scheme: dark;
+
+  /* Background / Surface */
+  --bg: #0b0f17;
+  --bg-sunken: #080b11;
+  --surface: #111723;
+  --surface-alt: #172030;
+  --surface-hover: #1b2536;
+  --surface-active: #212c40;
+  --surface-overlay: #151c2a;
+  --backdrop: rgb(4 6 10 / 0.66);
+
+  /* Border */
+  --border: #232d3d;
+  --border-strong: #324057;
+  --border-focus: #7c98ff;
+
+  /* Text */
+  --text: #e8edf4;
+  --text-secondary: #a3afc0;
+  --text-tertiary: #7d8aa0;
+  --text-disabled: #586377;
+  --text-on-solid: #ffffff;
+
+  /* Accent */
+  --accent: #8aa3ff;
+  --accent-solid: #4d63d9;
+  --accent-solid-hover: #5a70e4;
+  --accent-subtle: rgb(114 148 255 / 0.13);
+  --accent-border: rgb(114 148 255 / 0.36);
+
+  /* Semantic */
+  --success: #3fc49f;
+  --success-subtle: rgb(51 184 148 / 0.13);
+  --success-border: rgb(51 184 148 / 0.34);
+  --warning: #e8b45c;
+  --warning-subtle: rgb(228 173 80 / 0.13);
+  --warning-border: rgb(228 173 80 / 0.36);
+  --danger: #ef7d84;
+  --danger-solid: #c9404a;
+  --danger-solid-hover: #d64e58;
+  --danger-subtle: rgb(227 107 114 / 0.13);
+  --danger-border: rgb(227 107 114 / 0.38);
+  --info: #6cbfe8;
+  --info-subtle: rgb(108 191 232 / 0.12);
+  --info-border: rgb(108 191 232 / 0.32);
+  --live: #ff6f9c;
+  --live-subtle: rgb(255 111 156 / 0.13);
+  --live-border: rgb(255 111 156 / 0.38);
+  --neutral: #8693a8;
+  --neutral-subtle: rgb(134 147 168 / 0.12);
+  --neutral-border: rgb(134 147 168 / 0.3);
+
+  /* Platform */
+  --platform-tiktok: #e9eef6;
+  --platform-twitcasting: #6cbfe8;
+
+  /* Shadow */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.32), 0 1px 3px rgb(0 0 0 / 0.24);
+  --shadow-lg: 0 16px 48px rgb(0 0 0 / 0.48), 0 2px 8px rgb(0 0 0 / 0.3);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--border-focus);
+
+  /* Typography */
+  --font-sans: "Inter Variable", "Noto Sans JP Variable", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Yu Gothic UI", "Meiryo", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas,
+    "Noto Sans JP Variable", monospace;
+
+  --fs-caption: 0.75rem;   /* 12px */
+  --fs-secondary: 0.8125rem; /* 13px */
+  --fs-body: 0.875rem;     /* 14px */
+  --fs-card-title: 0.9375rem; /* 15px */
+  --fs-section-title: 1rem; /* 16px */
+  --fs-page-title: 1.375rem; /* 22px */
+  --fs-metric: 1.875rem;   /* 30px */
+  --fs-metric-sm: 1.125rem; /* 18px */
+  --fs-th: 0.75rem;
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 650;
+
+  --lh-tight: 1.25;
+  --lh-snug: 1.4;
+  --lh-body: 1.6;
+  --tracking-tight: -0.011em;
+  --tracking-caps: 0.04em;
+
+  /* Spacing (4px grid) */
+  --sp-0: 0;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  /* Radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* Size */
+  --sidebar-width: 240px;
+  --topbar-height: 52px;
+  --content-max: 1320px;
+  --control-height: 36px;
+  --control-height-sm: 30px;
+  --tap-target: 44px;
+  --icon-sm: 14px;
+  --icon-md: 16px;
+  --icon-lg: 20px;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Layer */
+  --z-sticky: 20;
+  --z-drawer: 40;
+  --z-menu: 60;
+  --z-toast: 80;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f5f6f8;
+  --bg-sunken: #eef0f3;
+  --surface: #ffffff;
+  --surface-alt: #f6f7f9;
+  --surface-hover: #f1f3f6;
+  --surface-active: #e8ebf0;
+  --surface-overlay: #ffffff;
+  --backdrop: rgb(15 20 30 / 0.4);
+
+  --border: #e2e6ec;
+  --border-strong: #cdd3dd;
+  --border-focus: #3d5ae0;
+
+  --text: #121926;
+  --text-secondary: #4f5b6d;
+  --text-tertiary: #5b6779;
+  --text-disabled: #a2abb8;
+  --text-on-solid: #ffffff;
+
+  --accent: #3550d4;
+  --accent-solid: #3d5ae0;
+  --accent-solid-hover: #3048c4;
+  --accent-subtle: rgb(61 90 224 / 0.08);
+  --accent-border: rgb(61 90 224 / 0.3);
+
+  --success: #0b7a5e;
+  --success-subtle: rgb(11 122 94 / 0.08);
+  --success-border: rgb(11 122 94 / 0.28);
+  --warning: #92570a;
+  --warning-subtle: rgb(196 125 20 / 0.1);
+  --warning-border: rgb(196 125 20 / 0.34);
+  --danger: #c2333d;
+  --danger-solid: #c2333d;
+  --danger-solid-hover: #a82a33;
+  --danger-subtle: rgb(194 51 61 / 0.07);
+  --danger-border: rgb(194 51 61 / 0.3);
+  --info: #1f6fae;
+  --info-subtle: rgb(31 111 174 / 0.08);
+  --info-border: rgb(31 111 174 / 0.28);
+  --live: #cc2f68;
+  --live-subtle: rgb(204 47 104 / 0.08);
+  --live-border: rgb(204 47 104 / 0.3);
+  --neutral: #687487;
+  --neutral-subtle: rgb(104 116 135 / 0.08);
+  --neutral-border: rgb(104 116 135 / 0.26);
+
+  --platform-tiktok: #121926;
+  --platform-twitcasting: #1f6fae;
+
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-md: 0 4px 12px rgb(16 24 40 / 0.08), 0 1px 3px rgb(16 24 40 / 0.06);
+  --shadow-lg: 0 16px 48px rgb(16 24 40 / 0.16), 0 2px 8px rgb(16 24 40 / 0.08);
+}

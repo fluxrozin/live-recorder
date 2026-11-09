@@ -1,0 +1,45 @@
+{% import "components/ui.html" as ui with context %}
+<header class="c-card__header">
+  <h2 class="c-card__title" id="active-title">{{ ui.icon("radio") }}アクティブセッション <span class="c-count">{{ active|length }}</span></h2>
+  <div class="c-card__actions">
+    <span class="c-freshness" data-poll-status>{{ ui.icon("clock", "sm") }}<span>更新 <time class="u-num" datetime="{{ rendered_at|iso }}">{{ rendered_at|clock(tz) }}</time> · 30秒ごと</span></span>
+    <button type="button" class="c-icon-btn c-icon-btn--sm" hx-get="/partials/active-sessions" hx-target="#active-sessions" hx-swap="innerHTML" hx-indicator="#active-sessions" aria-label="アクティブセッションを今すぐ更新" title="今すぐ更新">{{ ui.icon("refresh-cw", "sm") }}</button>
+  </div>
+</header>
+{% if worker.state != "ok" %}
+<div class="c-card__body">
+  {{ ui.alert("warning", title="状態が最新でない可能性があります",
+      text="ワーカーの応答が確認できません（" ~ (worker.last_seen_at|ago if worker.last_seen_at else "応答記録なし") ~ "）。以下は最後に記録された状態です。") }}
+</div>
+{% endif %}
+{% if active %}
+<ul class="c-session-list">
+  {% for item in active %}
+  <li class="c-session">
+    <div class="c-session__who">
+      <a class="c-session__name u-truncate" href="/recordings/{{ item.id }}">{{ item.name }}</a>
+      <div class="u-row">
+        {{ ui.platform(item.platform) }}
+        {% if item.title %}<span class="c-session__title u-truncate" title="{{ item.title }}">{{ item.title }}</span>{% endif %}
+      </div>
+    </div>
+    <div class="c-session__states">
+      <div class="c-session__state"><span class="c-session__state-label">配信</span>{{ ui.status("session", item.session_status) }}</div>
+      <div class="c-session__state"><span class="c-session__state-label">録画</span>{{ ui.status("rec", item.recording_status) }}</div>
+      <div class="c-session__state">
+        <span class="c-session__state-label">コメント</span>
+        <span class="u-row">{{ ui.status("com", item.comment_status) }}{% if item.comment_received %}<span class="u-caption u-num">{{ "{:,}".format(item.comment_received) }}件</span>{% endif %}</span>
+      </div>
+    </div>
+    <div class="c-session__time">
+      {% set since = item.recording_started_at or item.detected_at %}
+      <span class="u-caption">{{ "録画経過" if item.recording_started_at else "検知から" }}</span>
+      <span class="c-session__elapsed" data-elapsed-since="{{ since|iso }}">{{ ((rendered_at - since).total_seconds() * 1000)|int|duration }}</span>
+      <span class="u-caption">開始 {{ since|shorttime(tz) }}</span>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+{{ ui.empty("radio", "現在配信中のアカウントはありません", "配信開始を検知すると、録画とコメント収集の状態がここに表示されます。", compact=True) }}
+{% endif %}

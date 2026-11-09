@@ -1,0 +1,90 @@
+{% import "components/ui.html" as ui with context %}
+
+{% set NAV_GROUPS = [
+  ("main", "メイン", [
+    ("dashboard", "/", "ダッシュボード", "layout-dashboard"),
+    ("streamers", "/streamers", "配信者", "radio-tower"),
+    ("recordings", "/recordings", "録画履歴", "film"),
+    ("comments", "/comments", "コメント", "message-square-text"),
+  ]),
+  ("system", "システム", [
+    ("settings", "/settings", "設定", "settings"),
+    ("system", "/system", "システム状態", "activity"),
+  ]),
+] %}
+
+{% macro nav_lookup(active) -%}
+{%- for group_id, group, items in NAV_GROUPS -%}{%- for key, href, label, icon_name in items -%}{%- if key == active -%}{{ group }}|{{ label }}|{{ href }}{%- endif -%}{%- endfor -%}{%- endfor -%}
+{%- endmacro %}
+
+{% macro sidebar(active) -%}
+<aside class="l-sidebar" id="sidebar" aria-label="サイドバー">
+  <div class="l-sidebar__brand">
+    <span class="c-logo" aria-hidden="true"><span class="c-logo__dot"></span></span>
+    <span class="l-sidebar__brand-text">
+      <span class="l-sidebar__brand-name">Live Recorder</span>
+      <span class="l-sidebar__brand-sub">Operations Console</span>
+    </span>
+    <button type="button" class="c-icon-btn l-sidebar__close" data-drawer-close aria-label="メニューを閉じる">{{ ui.icon("x") }}</button>
+  </div>
+  <nav class="c-nav" aria-label="メインナビゲーション">
+    {% for group_id, group, items in NAV_GROUPS %}
+    <div>
+      <p class="c-nav__group-label" id="nav-{{ group_id }}">{{ group }}</p>
+      <ul class="c-nav__list" aria-labelledby="nav-{{ group_id }}">
+        {% for key, href, label, icon_name in items %}
+        <li><a class="c-nav__item" href="{{ href }}"{% if key == active %} aria-current="page"{% endif %}>{{ ui.icon(icon_name) }}<span>{{ label }}</span></a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endfor %}
+  </nav>
+  <div class="l-sidebar__footer">
+    <div class="c-user">
+      <span class="c-user__avatar" aria-hidden="true">{{ (username or "?")[:1] }}</span>
+      <span class="c-streamer__text">
+        <span class="c-user__name u-truncate">{{ username }}</span>
+        <span class="c-user__role">管理者 · v{{ app_version }}</span>
+      </span>
+    </div>
+    <fieldset class="c-segmented c-segmented--block c-theme-switch" data-theme-switch>
+      <legend class="u-sr-only">表示テーマ</legend>
+      {% for value, label in [("system", "自動"), ("light", "ライト"), ("dark", "ダーク")] %}
+      <span class="c-segmented__item">
+        <input type="radio" name="theme" value="{{ value }}" id="theme-{{ value }}"{% if value == "system" %} checked{% endif %}>
+        <label class="c-segmented__label" for="theme-{{ value }}">{{ label }}</label>
+      </span>
+      {% endfor %}
+    </fieldset>
+    <form method="post" action="/logout">
+      {{ ui.csrf_input() }}
+      <button type="submit" class="c-btn c-btn--ghost c-btn--block">{{ ui.icon("log-out") }}<span>ログアウト</span></button>
+    </form>
+  </div>
+</aside>
+<div class="l-sidebar-backdrop" id="sidebar-backdrop" data-drawer-close hidden></div>
+{%- endmacro %}
+
+{% macro topbar(active, rendered_at, tz, crumbs=None) -%}
+{%- set found = nav_lookup(active).split("|") -%}
+<header class="l-topbar">
+  <button type="button" class="c-icon-btn l-topbar__menu" data-drawer-open aria-controls="sidebar" aria-expanded="false" aria-label="メニューを開く">{{ ui.icon("menu") }}</button>
+  <span class="l-topbar__brand">Live Recorder</span>
+  <nav class="c-breadcrumb" aria-label="現在地">
+    {% if found|length == 3 %}
+    <span>{{ found[0] }}</span>
+    <span class="c-breadcrumb__sep" aria-hidden="true">/</span>
+    {% if crumbs %}
+    <a href="{{ found[2] }}">{{ found[1] }}</a>
+    {% for label in crumbs %}
+    <span class="c-breadcrumb__sep" aria-hidden="true">/</span>
+    <span class="u-truncate"{% if loop.last %} aria-current="page"{% endif %}>{{ label }}</span>
+    {% endfor %}
+    {% else %}
+    <span aria-current="page">{{ found[1] }}</span>
+    {% endif %}
+    {% endif %}
+  </nav>
+  <div class="l-topbar__meta">{{ ui.freshness(rendered_at, tz) }}</div>
+</header>
+{%- endmacro %}

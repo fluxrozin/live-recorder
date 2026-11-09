@@ -1,21 +1,74 @@
 {% extends "base.html" %}
-{% block title %}配信者の編集{% endblock %}
+{% set active_nav = "streamers" %}
+{% set crumbs = [row.display_name, "編集"] %}
+{% block title %}{{ row.display_name }} の編集{% endblock %}
 {% block content %}
-<h1>配信者の編集</h1>
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-<form class="card" method="post">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <p>{{ row.platform|platform_label }} / {{ row.user_id }}</p>
-  <p class="muted">{{ row.profile_url }}</p>
-  <label>表示名 <input name="display_name" value="{{ row.display_name }}" required></label>
-  <label><input type="checkbox" name="monitoring_enabled" {% if row.monitoring_enabled %}checked{% endif %}> 監視</label>
-  <label><input type="checkbox" name="recording_enabled" {% if row.recording_enabled %}checked{% endif %}> 録画</label>
-  <label><input type="checkbox" name="comments_enabled" {% if row.comments_enabled %}checked{% endif %}> コメント収集</label>
-  <button type="submit">保存</button>
-</form>
-<form method="post" action="/streamers/{{ row.id }}/delete">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label><input type="checkbox" name="confirm" value="yes"> 履歴がない場合に削除する</label>
-  <button type="submit" class="danger">配信者を削除</button>
-</form>
+{% set eyebrow %}{{ ui.platform(row.platform) }}<span class="u-mono">{{ row.user_id }}</span>{% endset %}
+{% call ui.page_header(row.display_name, "表示名と、監視・録画・コメント収集の設定を変更します", eyebrow=eyebrow) %}
+  <a class="c-btn" href="/recordings?streamer_id={{ row.id }}">{{ ui.icon("history") }}録画履歴</a>
+{% endcall %}
+
+{% if error %}{{ ui.alert("danger", text=error, role="alert") }}{% endif %}
+
+<div class="l-grid-main">
+  <form class="c-card" method="post" action="/streamers/{{ row.id }}/edit" data-busy aria-labelledby="edit-title">
+    {{ ui.csrf_input() }}
+    <header class="c-card__header">
+      <h2 class="c-card__title" id="edit-title">{{ ui.icon("settings") }}基本設定</h2>
+    </header>
+    <div class="c-card__body u-stack">
+      <div class="c-field">
+        <label class="c-label" for="edit-name">表示名</label>
+        <input class="c-input" id="edit-name" name="display_name" value="{{ row.display_name }}" required maxlength="100" autocomplete="off" aria-describedby="edit-name-hint">
+        <p class="c-hint" id="edit-name-hint">一覧や録画履歴に表示される名前です。プラットフォームとユーザーIDは変更できません。</p>
+      </div>
+      <div class="c-option-list">
+        {{ ui.switch_option("monitoring_enabled", "監視", "OFF にすると配信開始を確認せず、状態は「監視停止」になります", row.monitoring_enabled) }}
+        {{ ui.switch_option("recording_enabled", "録画", "配信を検知したら自動で録画します", row.recording_enabled) }}
+        {{ ui.switch_option("comments_enabled", "コメント収集", "配信中のコメントを記録します", row.comments_enabled) }}
+      </div>
+    </div>
+    <footer class="c-card__footer">
+      <span class="u-spacer"></span>
+      <a class="c-btn" href="/streamers">キャンセル</a>
+      <button type="submit" class="c-btn c-btn--primary">変更を保存</button>
+    </footer>
+  </form>
+
+  <div class="u-stack-lg">
+    <section class="c-card" aria-labelledby="account-title">
+      <header class="c-card__header"><h2 class="c-card__title" id="account-title">{{ ui.icon("user") }}アカウント</h2></header>
+      <div class="c-card__body">
+        <dl class="c-props">
+          <dt>プラットフォーム</dt><dd>{{ ui.platform(row.platform) }}</dd>
+          <dt>ユーザーID</dt><dd class="u-mono">{{ row.user_id }}</dd>
+          <dt>プロフィール</dt><dd><a href="{{ row.profile_url }}" target="_blank" rel="noopener noreferrer" class="u-break">{{ row.profile_url }}</a></dd>
+          <dt>現在の状態</dt><dd>{{ ui.status("live", streamer_live_code(row)) }}</dd>
+          <dt>最終確認</dt><dd>{{ ui.time(row.last_checked_at, tz) }}</dd>
+          <dt>最終配信</dt><dd>{{ ui.time(row.last_live_at, tz) }}</dd>
+          <dt>最終録画</dt><dd>{{ ui.time(row.last_recording_at, tz) }}</dd>
+        </dl>
+        {% if row.last_error %}
+        <div class="u-stack-sm">{{ ui.alert("danger", title="最後に記録されたエラー", text=row.last_error) }}</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="c-card c-card--danger" aria-labelledby="danger-title">
+      <header class="c-card__header"><h2 class="c-card__title" id="danger-title">{{ ui.icon("triangle-alert") }}危険な操作</h2></header>
+      <div class="c-card__body u-stack">
+        <p class="u-small u-muted">配信者の登録を削除します。録画履歴が残っている配信者は削除できません。</p>
+        <div><button type="button" class="c-btn c-btn--danger-outline" data-dialog-open="delete-streamer" data-fill-name="{{ row.display_name }}">{{ ui.icon("trash-2") }}配信者を削除…</button></div>
+      </div>
+    </section>
+  </div>
+</div>
+
+{% call ui.confirm_dialog("delete-streamer", "配信者を削除", "/streamers/" ~ row.id ~ "/delete", "削除する") %}
+  <p><strong class="u-break" data-fill="name">{{ row.display_name }}</strong> の登録を削除します。</p>
+  <div class="c-impact">
+    {{ ui.impact("remove", "配信者の登録情報と、監視・録画・コメント収集の設定") }}
+    {{ ui.impact("info", "録画履歴がある配信者は削除できません。先に録画履歴を削除してください") }}
+  </div>
+{% endcall %}
 {% endblock %}

@@ -1,0 +1,189 @@
+{#- Live Recorder UI components. 使い方: {% import "components/ui.html" as ui with context %} -#}
+
+{% macro icon(name, size="", cls="") -%}
+<svg class="c-icon{% if size %} c-icon--{{ size }}{% endif %}{% if cls %} {{ cls }}{% endif %}" aria-hidden="true" focusable="false"><use href="{{ static_url('icons.svg') }}#i-{{ name }}"></use></svg>
+{%- endmacro %}
+
+{% macro csrf_input() -%}
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{%- endmacro %}
+
+{% macro status(kind, code, badge=False) -%}
+{%- set info = status_info(kind, code) -%}
+<span class="c-status c-status--{{ info.tone }}{% if badge %} c-status--badge{% endif %}{% if info.pulse %} is-pulse{% endif %}" data-status="{{ info.code }}">
+  {%- if info.icon == "dot" %}<span class="c-status__dot" aria-hidden="true"></span>{% else %}{{ icon(info.icon) }}{% endif -%}
+  <span>{{ info.label }}</span>
+</span>
+{%- endmacro %}
+
+{% macro platform(code, icon_only=False) -%}
+<span class="c-platform c-platform--{{ code }}{% if icon_only %} c-platform--icon-only{% endif %}">
+  <span class="c-platform__mark" aria-hidden="true">{{ icon("music-2" if code == "tiktok" else "cast") }}</span>
+  <span class="c-platform__name">{{ code|platform_label }}</span>
+</span>
+{%- endmacro %}
+
+{% macro time(value, tz) -%}
+{%- if value -%}
+<time datetime="{{ value|iso }}" title="{{ value|localtime(tz) }}" class="u-num">{{ value|shorttime(tz) }}</time>
+{%- else -%}
+<span class="u-subtle">—</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro page_header(title, description=None, eyebrow=None) -%}
+<header class="c-page-header">
+  <div class="c-page-header__text">
+    {% if eyebrow %}<div class="c-page-header__eyebrow">{{ eyebrow }}</div>{% endif %}
+    <h1 class="c-page-header__title">{{ title }}</h1>
+    {% if description %}<p class="c-page-header__desc">{{ description }}</p>{% endif %}
+  </div>
+  {% if caller is defined %}<div class="c-page-header__actions">{{ caller() }}</div>{% endif %}
+</header>
+{%- endmacro %}
+
+{% macro freshness(when, tz, label="表示時点") -%}
+<span class="c-freshness" title="{{ when|localtime(tz) }}">{{ icon("clock", "sm") }}{{ label }} <time datetime="{{ when|iso }}" class="u-num">{{ when|clock(tz) }}</time></span>
+{%- endmacro %}
+
+{% macro metric(label, value, icon_name, hint=None, state="") -%}
+<div class="c-metric{% if state %} is-{{ state }}{% endif %}">
+  <div class="c-metric__label">{{ icon(icon_name) }}<span>{{ label }}</span></div>
+  <div class="c-metric__value">{{ value }}</div>
+  <div class="c-metric__hint">{{ hint or "" }}</div>
+</div>
+{%- endmacro %}
+
+{% macro empty(icon_name, title, text=None, compact=False) -%}
+<div class="c-empty{% if compact %} c-empty--compact{% endif %}">
+  <div class="c-empty__icon">{{ icon(icon_name, "lg") }}</div>
+  <p class="c-empty__title">{{ title }}</p>
+  {% if text %}<p class="c-empty__text">{{ text }}</p>{% endif %}
+  {% if caller is defined %}<div class="c-empty__actions">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro alert(tone, title=None, text=None, role=None) -%}
+{%- set icons = {"success": "circle-check", "warning": "triangle-alert", "danger": "circle-alert", "info": "info", "neutral": "info"} -%}
+<div class="c-alert c-alert--{{ tone }}"{% if role %} role="{{ role }}"{% endif %}>
+  {{ icon(icons.get(tone, "info")) }}
+  <div class="c-alert__body">
+    {% if title %}<p class="c-alert__title">{{ title }}</p>{% endif %}
+    {% if text %}<p class="c-alert__text">{{ text }}</p>{% endif %}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro field_error(id, message) -%}
+{%- if message -%}
+<p class="c-field-error" id="{{ id }}">{{ icon("circle-alert") }}<span>{{ message }}</span></p>
+{%- endif -%}
+{%- endmacro %}
+
+{#- フォーム内の ON/OFF 項目。input[type=checkbox][role=switch] なので既存の "on" 送信仕様のまま -#}
+{% macro switch_option(name, title, hint=None, checked=False) -%}
+<label class="c-option">
+  <span class="c-option__text">
+    <span class="c-option__title">{{ title }}</span>
+    {% if hint %}<span class="c-hint">{{ hint }}</span>{% endif %}
+  </span>
+  <input class="c-switch-input" type="checkbox" role="switch" name="{{ name }}"{% if checked %} checked{% endif %}>
+</label>
+{%- endmacro %}
+
+{% macro menu(id, label, trigger_icon="ellipsis", header=None) -%}
+<div class="c-menu">
+  <button type="button" class="c-icon-btn" data-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="{{ id }}" aria-label="{{ label }}" title="{{ label }}">{{ icon(trigger_icon) }}</button>
+  <div class="c-menu__list" role="menu" id="{{ id }}" aria-label="{{ label }}" hidden>
+    {% if header %}<p class="c-menu__header">{{ header }}</p>{% endif %}
+    {{ caller() }}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro menu_button(id, label, header=None, icon_name="chevron-down", variant="") -%}
+<div class="c-menu">
+  <button type="button" class="c-btn{% if variant %} c-btn--{{ variant }}{% endif %}" data-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="{{ id }}"><span>{{ label }}</span>{{ icon(icon_name, "sm") }}</button>
+  <div class="c-menu__list" role="menu" id="{{ id }}" aria-label="{{ label }}" hidden>
+    {% if header %}<p class="c-menu__header">{{ header }}</p>{% endif %}
+    {{ caller() }}
+  </div>
+</div>
+{%- endmacro %}
+
+{#-
+  破壊的操作の確認ダイアログ。
+  ack を渡すと「理解した」チェックを必須にし、その値を既存仕様どおり confirm=yes として送る。
+-#}
+{% macro confirm_dialog(id, title, action, submit_label, subtitle=None, ack=None, hidden=None, tone="danger", icon_name="trash-2") -%}
+<dialog class="c-dialog" id="{{ id }}" aria-labelledby="{{ id }}-title">
+  <form class="c-dialog__form" method="post" action="{{ action }}" data-busy>
+    {{ csrf_input() }}
+    {% if not ack %}<input type="hidden" name="confirm" value="yes">{% endif %}
+    {% for key, value in (hidden or {}).items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    <header class="c-dialog__header">
+      <span class="c-dialog__icon{% if tone == 'danger' %} c-dialog__icon--danger{% endif %}">{{ icon(icon_name) }}</span>
+      <div class="c-dialog__heading">
+        <h2 class="c-dialog__title" id="{{ id }}-title">{{ title }}</h2>
+        {% if subtitle %}<p class="c-dialog__subtitle">{{ subtitle }}</p>{% endif %}
+      </div>
+      <button type="button" class="c-icon-btn c-dialog__close" data-dialog-close aria-label="閉じる">{{ icon("x") }}</button>
+    </header>
+    <div class="c-dialog__body">
+      {{ caller() }}
+      {% if ack %}
+      <label class="c-check-row">
+        <input class="c-check" type="checkbox" name="confirm" value="yes" required data-ack data-reset-on-close>
+        <span class="c-check-row__text"><span>{{ ack }}</span></span>
+      </label>
+      {% endif %}
+    </div>
+    <footer class="c-dialog__footer">
+      <button type="button" class="c-btn" data-dialog-close>キャンセル</button>
+      <button type="submit" class="c-btn {% if tone == 'danger' %}c-btn--danger{% else %}c-btn--primary{% endif %}">{{ submit_label }}</button>
+    </footer>
+  </form>
+</dialog>
+{%- endmacro %}
+
+{% macro impact(kind, text) -%}
+<p class="c-impact__row c-impact__row--{{ kind }}">{{ icon({"remove": "circle-x", "keep": "circle-check"}.get(kind, "info")) }}<span>{{ text }}</span></p>
+{%- endmacro %}
+
+{#- ページネーション。hx=True で結果領域 (#results) だけを差し替える -#}
+{% macro pagination(page, pages, total, page_size, hx=False) -%}
+{%- set first = (page - 1) * page_size + 1 if total else 0 -%}
+{%- set last = [page * page_size, total]|min -%}
+<nav class="c-pagination" aria-label="ページ送り">
+  <p class="c-pagination__info"><span class="u-num">{{ "{:,}".format(total) }}</span> 件中 <span class="u-num">{{ "{:,}".format(first) }}–{{ "{:,}".format(last) }}</span> 件を表示</p>
+  <div class="c-pagination__nav">
+    {% if page > 1 %}
+    <a class="c-btn c-btn--sm" href="{{ url_with(request, page=page - 1) }}" rel="prev"{% if hx %} hx-get="{{ url_with(request, page=page - 1) }}" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#results"{% endif %}>{{ icon("chevron-left", "sm") }}前へ</a>
+    {% else %}
+    <span class="c-btn c-btn--sm" aria-disabled="true">{{ icon("chevron-left", "sm") }}前へ</span>
+    {% endif %}
+    <span class="c-pagination__page" aria-current="page"><span class="u-num">{{ page }}</span> / <span class="u-num">{{ pages }}</span> ページ</span>
+    {% if page < pages %}
+    <a class="c-btn c-btn--sm" href="{{ url_with(request, page=page + 1) }}" rel="next"{% if hx %} hx-get="{{ url_with(request, page=page + 1) }}" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#results"{% endif %}>次へ{{ icon("chevron-right", "sm") }}</a>
+    {% else %}
+    <span class="c-btn c-btn--sm" aria-disabled="true">次へ{{ icon("chevron-right", "sm") }}</span>
+    {% endif %}
+  </div>
+</nav>
+{%- endmacro %}
+
+{#- 適用中フィルターのチップ。chips は (ラベル, 表示値, クエリキー) の列。解除は検索フォームの値も揃うよう通常遷移にする -#}
+{% macro filter_chips(chips, reset_url) -%}
+{%- if chips -%}
+<div class="c-chips" aria-label="適用中の条件">
+  {% for label, value, key in chips %}
+  <span class="c-chip">
+    <span class="c-chip__key">{{ label }}</span><span class="c-chip__value">{{ value }}</span>
+    <a class="c-chip__remove" href="{{ url_with(request, drop=[key, 'page']) }}" aria-label="条件「{{ label }}：{{ value }}」を解除">{{ icon("x", "sm") }}</a>
+  </span>
+  {% endfor %}
+  <a class="c-btn c-btn--ghost c-btn--sm" href="{{ reset_url }}">{{ icon("rotate-ccw", "sm") }}条件をリセット</a>
+</div>
+{%- endif -%}
+{%- endmacro %}

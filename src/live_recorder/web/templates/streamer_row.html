@@ -1,29 +1,55 @@
-<tr id="streamer-{{ row.id }}">
-  <td>{{ row.platform|platform_label }}</td>
-  <td>{{ row.display_name }}<div class="muted">{{ row.user_id }}</div></td>
-  <td><span class="pill {{ row.live_status }}">{{ row.live_status|live_label }}</span></td>
-  <td><span class="pill {{ row.recording_state }}">{{ row.recording_state|rec_label }}</span></td>
-  <td><span class="pill {{ row.comment_state }}">{{ row.comment_state|com_label }}</span></td>
-  <td>{{ row.last_checked_at|localtime(tz) }}</td>
-  <td>{{ row.last_live_at|localtime(tz) }}</td>
-  <td>{{ row.last_recording_at|localtime(tz) }}</td>
-  <td class="actions">
-    <form method="post" action="/streamers/{{ row.id }}/toggle" hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="field" value="monitoring_enabled">
-      <button type="submit" class="secondary">監視{{ "停止" if row.monitoring_enabled else "開始" }}</button>
+{% import "components/ui.html" as ui with context %}
+{%- set live_code = streamer_live_code(row) -%}
+<tr id="streamer-{{ row.id }}" data-search="{{ row.display_name }} {{ row.user_id }} {{ row.platform|platform_label }}"{% if not row.monitoring_enabled %} class="is-muted"{% endif %}>
+  <td class="is-who is-fill">
+    <div class="c-streamer">
+      <span class="c-streamer__avatar" aria-hidden="true">{{ row.display_name[:1] }}</span>
+      <div class="c-streamer__text">
+        <span class="c-streamer__name u-truncate" title="{{ row.display_name }}">{{ row.display_name }}</span>
+        <span class="c-streamer__meta">
+          {{ ui.platform(row.platform) }}
+          <span class="c-streamer__id u-truncate" title="{{ row.user_id }}">{{ row.user_id }}</span>
+        </span>
+      </div>
+    </div>
+    <p class="c-row-error" data-row-error role="status" hidden>{{ ui.icon("circle-alert", "sm") }}<span data-row-error-text></span></p>
+  </td>
+  <td class="is-status" data-label="状態">
+    <div class="c-state-stack">
+      {{ ui.status("live", live_code) }}
+      {% if row.recording_state != "NONE" or row.comment_state != "NONE" %}
+      <span class="u-row u-row--wrap">
+        {% if row.recording_state != "NONE" %}{{ ui.status("rec", row.recording_state) }}{% endif %}
+        {% if row.comment_state != "NONE" %}{{ ui.status("com", row.comment_state) }}{% endif %}
+      </span>
+      {% endif %}
+      {% if live_code == "ERROR" and row.last_error %}<span class="u-caption u-truncate c-state-stack__error" title="{{ row.last_error }}">{{ row.last_error }}</span>{% endif %}
+      <span class="c-table__secondary c-state-stack__checked">最終確認 {{ ui.time(row.last_checked_at, tz) }}</span>
+    </div>
+  </td>
+  {% for field, label in [("monitoring_enabled", "監視"), ("recording_enabled", "録画"), ("comments_enabled", "コメント収集")] %}
+  {%- set on = row[field] -%}
+  <td class="is-switch is-shrink" data-label="{{ label }}">
+    <form method="post" action="/streamers/{{ row.id }}/toggle"
+          hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML" hx-disabled-elt="find button"
+          data-toggle data-row="streamer-{{ row.id }}" data-field="{{ field }}" data-label="{{ label }}" data-name="{{ row.display_name }}">
+      {{ ui.csrf_input() }}
+      <input type="hidden" name="field" value="{{ field }}">
+      <button type="submit" class="c-switch" role="switch" aria-checked="{{ 'true' if on else 'false' }}" aria-label="{{ label }}（{{ row.display_name }}）" title="{{ label }}を{{ 'OFF' if on else 'ON' }}にする">
+        <span class="c-switch__track" aria-hidden="true"><span class="c-switch__thumb"></span></span>
+        <span class="c-switch__state u-show-sm" aria-hidden="true">{{ "ON" if on else "OFF" }}</span>
+      </button>
     </form>
-    <form method="post" action="/streamers/{{ row.id }}/toggle" hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="field" value="recording_enabled">
-      <button type="submit" class="secondary">録画{{ "停止" if row.recording_enabled else "開始" }}</button>
-    </form>
-    <form method="post" action="/streamers/{{ row.id }}/toggle" hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="field" value="comments_enabled">
-      <button type="submit" class="secondary">コメント{{ "停止" if row.comments_enabled else "開始" }}</button>
-    </form>
-    <a class="button secondary" href="/streamers/{{ row.id }}/edit">編集</a>
-    <a class="button secondary" href="/recordings?streamer_id={{ row.id }}">履歴</a>
+  </td>
+  {% endfor %}
+  <td class="is-actions is-corner">
+    {% call ui.menu("menu-streamer-" ~ row.id, "操作メニュー：" ~ row.display_name) %}
+      <a class="c-menu__item" role="menuitem" href="/streamers/{{ row.id }}/edit">{{ ui.icon("pencil") }}編集</a>
+      <a class="c-menu__item" role="menuitem" href="/recordings?streamer_id={{ row.id }}">{{ ui.icon("history") }}録画履歴</a>
+      <a class="c-menu__item" role="menuitem" href="/comments?streamer_id={{ row.id }}">{{ ui.icon("message-square-text") }}コメント</a>
+      <a class="c-menu__item" role="menuitem" href="{{ row.profile_url }}" target="_blank" rel="noopener noreferrer">{{ ui.icon("external-link") }}プロフィールを開く</a>
+      <div class="c-menu__sep" role="separator"></div>
+      <button type="button" class="c-menu__item c-menu__item--danger" role="menuitem" data-dialog-open="delete-streamer" data-dialog-action="/streamers/{{ row.id }}/delete" data-fill-name="{{ row.display_name }}">{{ ui.icon("trash-2") }}削除…</button>
+    {% endcall %}
   </td>
 </tr>

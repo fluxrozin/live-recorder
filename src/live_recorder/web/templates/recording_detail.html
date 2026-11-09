@@ -1,65 +1,208 @@
 {% extends "base.html" %}
-{% block title %}配信の詳細{% endblock %}
+{% set active_nav = "recordings" %}
+{% set crumbs = ["#" ~ detail.id] %}
+{% block title %}{{ detail.name }} の録画 #{{ detail.id }}{% endblock %}
 {% block content %}
-<h1>{{ detail.name }}</h1>
-<p>{{ detail.platform|platform_label }} / {{ detail.user_id }} / 配信ID {{ detail.stream_id }}</p>
-<p>{{ detail.title }}</p>
-<p>配信状態 <span class="pill {{ detail.status }}">{{ detail.status|session_label }}</span>
-   録画 <span class="pill {{ detail.recording_status }}">{{ detail.recording_status|rec_label }}</span>
-   コメント <span class="pill {{ detail.comment_status }}">{{ detail.comment_status|com_label }}</span></p>
-<p class="muted">検知 {{ detail.detected_at|localtime(tz) }} / プラットフォーム開始 {{ detail.platform_started_at|localtime(tz) }} / 終了検知 {{ detail.ended_detected_at|localtime(tz) }}</p>
-<p>録画エンジン: {{ detail.engine }}</p>
-{% if detail.recording_error %}<p class="error">{{ detail.recording_error }}</p>{% endif %}
-<p>コメント受信 {{ detail.comment_received }} / 保存 {{ detail.comment_stored }} / 失敗 {{ detail.comment_errors }}</p>
-<p class="actions">
-  <a class="button" href="/comments/export?session_id={{ detail.id }}&format=jsonl">JSONL</a>
-  <a class="button" href="/comments/export?session_id={{ detail.id }}&format=csv">CSV</a>
-  <a class="button" href="/comments/export?session_id={{ detail.id }}&format=txt">TXT</a>
-  <a class="button secondary" href="/comments?session_id={{ detail.id }}">コメントを見る</a>
-</p>
-<h2>ファイル</h2>
-<div class="table-wrap">
-  <table>
-    <thead><tr><th>#</th><th>開始</th><th>終了</th><th>時間</th><th>サイズ</th><th>形式</th><th>検証</th><th></th></tr></thead>
-    <tbody>
-      {% for segment in detail.segments %}
-      <tr>
-        <td>{{ segment.number }}</td>
-        <td>{{ segment.started_at|localtime(tz) }}</td>
-        <td>{{ segment.finished_at|localtime(tz) }}</td>
-        <td>{{ segment.duration_ms|offset }}</td>
-        <td>{{ segment.size|bytes }}</td>
-        <td>{{ segment.container }}</td>
-        <td>{{ segment.validation }}</td>
-        <td>
-          {% if not segment.removed %}
-          <a href="/recordings/segments/{{ segment.id }}/download">{{ segment.name }} をダウンロード</a>
-          {% else %}削除済み{% endif %}
-        </td>
-      </tr>
-      {% else %}
-      <tr><td colspan="8">ファイルはありません。</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+{%- set visible = detail.segments|rejectattr("removed")|list -%}
+{%- set missing = visible|rejectattr("exists")|list -%}
+{%- set total_size = visible|map(attribute="size")|reject("none")|sum -%}
+{%- set total_ms = visible|map(attribute="duration_ms")|reject("none")|sum -%}
+{%- set gap_labels = {"recording": "録画", "comments": "コメント"} %}
+
+{% set eyebrow %}{{ ui.platform(detail.platform) }}<span class="u-mono u-truncate">{{ detail.user_id }}</span><span class="u-subtle">· #{{ detail.id }}</span>{% endset %}
+{% call ui.page_header(detail.name, detail.title if detail.title != "—" else "タイトルなし", eyebrow=eyebrow) %}
+  <a class="c-btn" href="/comments?session_id={{ detail.id }}">{{ ui.icon("message-square-text") }}コメントを見る<span class="c-count">{{ "{:,}".format(detail.comments_total) }}</span></a>
+  {% call ui.menu_button("export-menu", "エクスポート", header="この配信のコメント " ~ "{:,}".format(detail.comments_total) ~ " 件をすべて出力します", icon_name="chevron-down") %}
+    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;format=jsonl" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">機械処理向け</span></a>
+    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;format=csv" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">Excel向け</span></a>
+    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;format=txt" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">閲覧向け</span></a>
+  {% endcall %}
+{% endcall %}
+
+<div class="u-row u-row--wrap">
+  {{ ui.status("session", detail.status, badge=True) }}
+  {{ ui.status("rec", detail.recording_status, badge=True) }}
+  {{ ui.status("com", detail.comment_status, badge=True) }}
 </div>
-<h2>欠損</h2>
-<ul>
-  {% for gap in detail.gaps %}
-  <li>{{ gap.job_type }} {{ gap.started_at|localtime(tz) }} 〜 {{ gap.ended_at|localtime(tz) }} {{ gap.reason }}</li>
+
+{% if detail.recording_error %}
+{{ ui.alert("danger", title="録画エラー", text=detail.recording_error, role="alert") }}
+{% endif %}
+{% if detail.comment_error %}
+{{ ui.alert("warning", title="コメント収集で記録されたエラー", text=detail.comment_error) }}
+{% endif %}
+{% if missing %}
+{{ ui.alert("warning", title="保存先に見つからないファイルがあります", text=missing|length ~ " 個の録画ファイルが保存先に存在しないため、ダウンロードできません。システム状態の「ファイル照合」で詳細を確認できます。") }}
+{% endif %}
+
+<div class="l-grid-3">
+  <section class="c-card" aria-labelledby="overview-title">
+    <header class="c-card__header"><h2 class="c-card__title" id="overview-title">{{ ui.icon("radio") }}配信概要</h2></header>
+    <div class="c-card__body">
+      <dl class="c-props">
+        <dt>配信状態</dt><dd>{{ ui.status("session", detail.status) }}</dd>
+        <dt>配信ID</dt><dd class="u-mono">{{ detail.stream_id }}</dd>
+        <dt>配信開始</dt><dd>{{ ui.time(detail.platform_started_at, tz) }}</dd>
+        <dt>検知</dt><dd>{{ ui.time(detail.detected_at, tz) }}</dd>
+        <dt>終了検知</dt><dd>{{ ui.time(detail.ended_detected_at, tz) }}</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="c-card" aria-labelledby="rec-info-title">
+    <header class="c-card__header"><h2 class="c-card__title" id="rec-info-title">{{ ui.icon("video") }}録画情報</h2></header>
+    <div class="c-card__body">
+      <dl class="c-props">
+        <dt>録画状態</dt><dd>{{ ui.status("rec", detail.recording_status) }}</dd>
+        <dt>エンジン</dt><dd class="u-mono">{{ detail.engine or "—" }}</dd>
+        <dt>開始 / 終了</dt><dd>{{ ui.time(detail.recording_started_at, tz) }} 〜 {{ ui.time(detail.recording_finished_at, tz) }}</dd>
+        <dt>録画時間</dt><dd>{{ total_ms|duration if visible else "—" }}</dd>
+        <dt>ファイル</dt><dd>{{ visible|length }} 個 · {{ total_size|bytes if visible else "—" }}</dd>
+        <dt>再試行</dt><dd>{{ detail.recording_retries }} 回</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="c-card" aria-labelledby="com-info-title">
+    <header class="c-card__header"><h2 class="c-card__title" id="com-info-title">{{ ui.icon("message-circle") }}コメント収集</h2></header>
+    <div class="c-card__body">
+      <dl class="c-props">
+        <dt>収集状態</dt><dd>{{ ui.status("com", detail.comment_status) }}</dd>
+        <dt>保存済み</dt><dd>{{ "{:,}".format(detail.comments_total) }} 件</dd>
+        <dt>受信 / 保存</dt><dd>{{ "{:,}".format(detail.comment_received) }} / {{ "{:,}".format(detail.comment_stored) }}</dd>
+        <dt>失敗</dt><dd>{% if detail.comment_errors %}<span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}{{ detail.comment_errors }} 件</span>{% else %}0 件{% endif %}</dd>
+        <dt>再接続</dt><dd>{{ detail.comment_reconnects }} 回</dd>
+        <dt>最終受信</dt><dd>{{ ui.time(detail.comment_last_received_at, tz) }}</dd>
+      </dl>
+    </div>
+  </section>
+</div>
+
+<section class="c-card" aria-labelledby="files-title">
+  <header class="c-card__header">
+    <h2 class="c-card__title" id="files-title">{{ ui.icon("file-video") }}録画ファイル <span class="c-count">{{ detail.segments|length }}</span></h2>
+    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれます。</p>
+  </header>
+  {% if detail.segments %}
+  <div class="c-table-wrap">
+    <table class="c-table c-table--stack">
+      <thead>
+        <tr>
+          <th scope="col" class="is-shrink">#</th>
+          <th scope="col">ファイル</th>
+          <th scope="col">録画範囲</th>
+          <th scope="col" class="is-num">時間</th>
+          <th scope="col" class="is-num">サイズ</th>
+          <th scope="col">検証</th>
+          <th scope="col" class="is-actions"><span class="u-sr-only">ダウンロード</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for segment in detail.segments %}
+        <tr>
+          <td class="u-num u-muted is-shrink u-hide-sm">{{ segment.number }}</td>
+          <td class="is-span">
+            <div class="c-table__cell-stack">
+              <span class="u-mono u-break">{{ segment.name }}</span>
+              <span class="c-table__secondary">セグメント {{ segment.number }} · {{ segment.container }}</span>
+            </div>
+          </td>
+          <td data-label="録画範囲" class="u-nowrap">{{ ui.time(segment.started_at, tz) }} 〜 {{ segment.finished_at|clock(tz) if segment.finished_at else "記録中" }}</td>
+          <td class="is-num" data-label="時間">{{ segment.duration_ms|duration }}</td>
+          <td class="is-num" data-label="サイズ">{{ segment.size|bytes }}</td>
+          <td data-label="検証">{{ ui.status("validation", segment.validation) }}</td>
+          <td class="is-actions is-span">
+            {% if segment.removed %}
+            <span class="c-status c-status--neutral">{{ ui.icon("trash-2") }}削除済み</span>
+            {% elif not segment.exists %}
+            <span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}ファイルなし</span>
+            {% else %}
+            <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/download" download aria-label="{{ segment.name }} をダウンロード（{{ segment.size|bytes }}）">{{ ui.icon("download", "sm") }}ダウンロード</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   {% else %}
-  <li class="muted">記録された欠損はありません。</li>
-  {% endfor %}
-</ul>
-<form method="post" action="/recordings/{{ detail.id }}/delete-files">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label><input type="checkbox" name="confirm" value="yes"> ファイルだけ削除する</label>
-  <button class="danger" type="submit">ファイルを削除</button>
-</form>
-<form method="post" action="/recordings/{{ detail.id }}/delete">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label><input type="checkbox" name="confirm" value="yes"> 履歴を削除する</label>
-  <label><input type="checkbox" name="delete_files" value="yes"> ファイルも一緒に削除する</label>
-  <button class="danger" type="submit">履歴を削除</button>
-</form>
+  {{ ui.empty("file-video", "録画ファイルはありません", "録画が開始されなかったか、ファイルが作成される前に終了しました。", compact=True) }}
+  {% endif %}
+</section>
+
+<section class="c-card" aria-labelledby="gaps-title">
+  <header class="c-card__header">
+    <h2 class="c-card__title" id="gaps-title">{{ ui.icon("triangle-alert") }}データ欠損 <span class="c-count{% if detail.gaps %} c-count--warning{% endif %}">{{ detail.gaps|length }}</span></h2>
+    <p class="c-card__subtitle">録画またはコメント収集が途切れていた区間です。</p>
+  </header>
+  {% if detail.gaps %}
+  <div class="c-table-wrap">
+    <table class="c-table c-table--compact c-table--stack">
+      <thead><tr><th scope="col">対象</th><th scope="col">開始</th><th scope="col">終了</th><th scope="col">理由</th></tr></thead>
+      <tbody>
+        {% for gap in detail.gaps %}
+        <tr>
+          <td class="is-span"><span class="c-tag c-tag--warning">{{ gap_labels.get(gap.job_type, gap.job_type) }}</span></td>
+          <td data-label="開始">{{ ui.time(gap.started_at, tz) }}</td>
+          <td data-label="終了">{{ ui.time(gap.ended_at, tz) }}</td>
+          <td class="is-span u-break" data-label="理由">{{ gap.reason }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="c-card__body"><p class="u-small u-muted">記録された欠損はありません。</p></div>
+  {% endif %}
+</section>
+
+<section class="c-card c-card--danger" aria-labelledby="danger-title">
+  <header class="c-card__header"><h2 class="c-card__title" id="danger-title">{{ ui.icon("triangle-alert") }}削除</h2></header>
+  <div class="c-danger-list">
+    <div class="c-danger-row">
+      <div class="c-danger-row__text">
+        <p class="c-danger-row__title">録画ファイルのみ削除</p>
+        <p class="u-small u-muted">保存先の録画ファイルを削除します。録画履歴とコメントは残ります。</p>
+      </div>
+      <button type="button" class="c-btn c-btn--danger-outline" data-dialog-open="delete-files"{% if not visible %} disabled title="削除できるファイルがありません"{% endif %}>{{ ui.icon("file-video") }}ファイルを削除…</button>
+    </div>
+    <div class="c-danger-row">
+      <div class="c-danger-row__text">
+        <p class="c-danger-row__title">録画履歴を削除</p>
+        <p class="u-small u-muted">履歴とコメントを削除します。録画ファイルは保存先に残ります。</p>
+      </div>
+      <button type="button" class="c-btn c-btn--danger-outline" data-dialog-open="delete-history">{{ ui.icon("history") }}履歴を削除…</button>
+    </div>
+    <div class="c-danger-row">
+      <div class="c-danger-row__text">
+        <p class="c-danger-row__title">履歴とファイルをすべて削除</p>
+        <p class="u-small u-muted">履歴・コメント・録画ファイルをまとめて削除します。</p>
+      </div>
+      <button type="button" class="c-btn c-btn--danger" data-dialog-open="delete-all">{{ ui.icon("trash-2") }}すべて削除…</button>
+    </div>
+  </div>
+</section>
+
+{% call ui.confirm_dialog("delete-files", "録画ファイルを削除", "/recordings/" ~ detail.id ~ "/delete-files", "ファイルを削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="録画ファイルが元に戻せないことを理解しました", icon_name="file-video") %}
+  <div class="c-impact">
+    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）を保存先から削除") }}
+    {{ ui.impact("keep", "録画履歴とコメント " ~ "{:,}".format(detail.comments_total) ~ " 件は残ります") }}
+  </div>
+{% endcall %}
+
+{% call ui.confirm_dialog("delete-history", "録画履歴を削除", "/recordings/" ~ detail.id ~ "/delete", "履歴を削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="履歴とコメントが元に戻せないことを理解しました", icon_name="history") %}
+  <div class="c-impact">
+    {{ ui.impact("remove", "この録画セッションの履歴と、録画ファイル・欠損の記録") }}
+    {{ ui.impact("remove", "コメント " ~ "{:,}".format(detail.comments_total) ~ " 件と、自動書き出し済みのコメントファイル") }}
+    {{ ui.impact("keep", "録画ファイル " ~ visible|length ~ " 個は保存先に残ります（管理画面からは参照できなくなります）") }}
+  </div>
+{% endcall %}
+
+{% call ui.confirm_dialog("delete-all", "履歴とファイルをすべて削除", "/recordings/" ~ detail.id ~ "/delete", "すべて削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="履歴・コメント・録画ファイルが元に戻せないことを理解しました", hidden={"delete_files": "yes"}) %}
+  <div class="c-impact">
+    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）") }}
+    {{ ui.impact("remove", "コメント " ~ "{:,}".format(detail.comments_total) ~ " 件と、自動書き出し済みのコメントファイル") }}
+    {{ ui.impact("remove", "この録画セッションの履歴と欠損の記録") }}
+  </div>
+{% endcall %}
 {% endblock %}

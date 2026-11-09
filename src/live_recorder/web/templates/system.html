@@ -1,67 +1,211 @@
 {% extends "base.html" %}
-{% block title %}システム{% endblock %}
+{% set active_nav = "system" %}
+{% block title %}システム状態{% endblock %}
 {% block content %}
-<h1>システム状態</h1>
-<section class="grid">
-  <article class="card"><span class="muted">Web</span><strong>稼働中</strong></article>
-  <article class="card"><span class="muted">ワーカー</span><strong>{{ "稼働中" if worker_ok else "停止または無応答" }}</strong><span class="muted">{% if worker_age is not none %}{{ worker_age }} 秒前{% endif %}</span></article>
-  <article class="card"><span class="muted">PostgreSQL</span><strong>{{ "接続できています" if db_ok else "失敗" }}</strong></article>
-  <article class="card"><span class="muted">最終監視</span><strong>{{ last_checked|localtime(tz) }}</strong></article>
+{% call ui.page_header("システム状態", "コンテナ、データベース、録画エンジンの稼働状況と、保存先の診断を確認します") %}
+  <a class="c-btn" href="/system">{{ ui.icon("refresh-cw", "sm") }}再読み込み</a>
+{% endcall %}
+
+{%- set check_age = (rendered_at - last_checked).total_seconds() if last_checked else none -%}
+{%- if last_checked is none -%}
+  {%- set check_state = "unknown" -%}
+{%- elif check_age > monitor_interval * 3 + 30 -%}
+  {%- set check_state = "warning" -%}
+{%- else -%}
+  {%- set check_state = "ok" -%}
+{%- endif %}
+
+<section class="c-health-grid" aria-label="ヘルスチェック">
+  <div class="c-health">
+    <div class="c-health__head"><span class="c-health__label">{{ ui.icon("globe") }}Webアプリ</span>{{ ui.status("health", "ok") }}</div>
+    <div class="c-health__value">稼働中</div>
+    <div class="c-health__hint">バージョン {{ versions.app }}</div>
+  </div>
+  <div class="c-health{% if worker.state == 'warning' %} c-health--warning{% elif worker.state == 'error' %} c-health--danger{% endif %}">
+    <div class="c-health__head"><span class="c-health__label">{{ ui.icon("cpu") }}ワーカー</span>{{ ui.status("health", worker.state) }}</div>
+    <div class="c-health__value">{{ worker.label }}</div>
+    <div class="c-health__hint">{% if worker.last_seen_at %}最終応答 {{ worker.last_seen_at|ago }}（{{ worker.last_seen_at|clock(tz) }}）{% else %}ハートビートの記録がありません{% endif %}</div>
+  </div>
+  <div class="c-health">
+    <div class="c-health__head"><span class="c-health__label">{{ ui.icon("database") }}PostgreSQL</span>{{ ui.status("health", "ok" if db_ok else "error") }}</div>
+    <div class="c-health__value">{{ "接続中" if db_ok else "接続できません" }}</div>
+    <div class="c-health__hint">このページの取得時に確認</div>
+  </div>
+  <div class="c-health{% if check_state == 'warning' %} c-health--warning{% endif %}">
+    <div class="c-health__head"><span class="c-health__label">{{ ui.icon("clock") }}最終監視</span>{{ ui.status("health", check_state) }}</div>
+    <div class="c-health__value">{{ ui.time(last_checked, tz) }}</div>
+    <div class="c-health__hint">{% if last_checked %}{{ last_checked|ago }} · {% endif %}間隔 {{ monitor_interval }}秒 · 監視中 {{ monitored }} 件</div>
+  </div>
 </section>
-<p>署名キー {{ "設定済み" if sign_key else "未設定" }} / ツイキャス認証 {{ "設定済み" if twitcasting else "未設定" }}</p>
-<h2>バージョン</h2>
-<ul>
-  <li>アプリ {{ versions.app }}</li>
-  <li>Streamlink {{ versions.streamlink or "未検出" }}</li>
-  <li>yt-dlp {{ versions.yt_dlp or "未検出" }}</li>
-  <li>TikTokLive {{ versions.tiktoklive or "未検出" }}</li>
-  <li>FFmpeg {{ versions.ffmpeg or "未検出" }}</li>
-  <li>ffprobe {{ versions.ffprobe or "未検出" }}</li>
-</ul>
-<h2>録画エンジン</h2>
-<div class="table-wrap">
-  <table>
-    <thead><tr><th>名前</th><th>バージョン</th><th>使用可否</th><th>最終成功</th><th>最終失敗</th><th>理由</th><th>失敗回数</th></tr></thead>
-    <tbody>
-      {% for engine in engines %}
-      <tr>
-        <td>{{ engine.name }}</td>
-        <td>{{ engine.version }}</td>
-        <td>{{ "可" if engine.available else "不可" }}</td>
-        <td>{{ engine.last_success_at|localtime(tz) }}</td>
-        <td>{{ engine.last_failure_at|localtime(tz) }}</td>
-        <td>{{ engine.failure_reason }}</td>
-        <td>{{ engine.retry_count }}</td>
-      </tr>
+
+<div class="l-grid-main">
+  <div class="u-stack-lg">
+    <section class="c-card" aria-labelledby="engines-title">
+      <header class="c-card__header">
+        <h2 class="c-card__title" id="engines-title">{{ ui.icon("video") }}録画エンジン</h2>
+        <p class="c-card__subtitle">TikTok LIVE の録画に使うエンジンの状態です。</p>
+      </header>
+      {% if engines %}
+      <div class="c-table-wrap">
+        <table class="c-table c-table--compact c-table--stack">
+          <thead>
+            <tr>
+              <th scope="col">エンジン</th><th scope="col">使用可否</th>
+              <th scope="col">最終成功</th><th scope="col">最終失敗</th><th scope="col" class="is-num">失敗回数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for engine in engines %}
+            <tr>
+              <td>
+                <div class="c-table__cell-stack">
+                  <span class="u-mono c-table__primary">{{ engine.name }}</span>
+                  <span class="c-table__secondary u-mono u-truncate" title="{{ engine.version or '' }}">{{ engine.version or "バージョン不明" }}</span>
+                </div>
+              </td>
+              <td class="is-corner">{% if engine.available %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}使用可</span>{% else %}<span class="c-status c-status--danger">{{ ui.icon("circle-x") }}使用不可</span>{% endif %}</td>
+              <td data-label="最終成功">{{ ui.time(engine.last_success_at, tz) }}</td>
+              <td class="is-fill" data-label="最終失敗">
+                <div class="c-table__cell-stack">
+                  {{ ui.time(engine.last_failure_at, tz) }}
+                  {% if engine.failure_reason %}<span class="c-table__secondary c-table__title u-truncate" title="{{ engine.failure_reason }}">{{ engine.failure_reason }}</span>{% endif %}
+                </div>
+              </td>
+              <td class="is-num" data-label="失敗回数">{% if engine.retry_count %}<span class="c-count c-count--warning">{{ engine.retry_count }}</span>{% else %}<span class="u-subtle">0</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
       {% else %}
-      <tr><td colspan="7">ワーカー起動後に記録されます。</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+      {{ ui.empty("video", "エンジンの記録はまだありません", "ワーカーの起動後に、各エンジンの状態が記録されます。", compact=True) }}
+      {% endif %}
+    </section>
+
+    {%- set err_n = events|selectattr("severity", "equalto", "error")|list|length -%}
+    {%- set warn_n = events|selectattr("severity", "equalto", "warning")|list|length -%}
+    {%- set info_n = events|selectattr("severity", "equalto", "info")|list|length %}
+    <section class="c-card" id="events" aria-labelledby="events-title">
+      <header class="c-card__header">
+        <h2 class="c-card__title" id="events-title">{{ ui.icon("history") }}システムイベント</h2>
+        <div class="c-card__actions c-card__actions--wide">
+          <div class="c-segmented" role="group" aria-label="重要度で絞り込み" data-seg-filter="#event-list">
+            <button type="button" data-value="all" aria-pressed="true">すべて <span class="c-count">{{ events|length }}</span></button>
+            <button type="button" data-value="error" aria-pressed="false">エラー <span class="c-count{% if err_n %} c-count--danger{% endif %}">{{ err_n }}</span></button>
+            <button type="button" data-value="warning" aria-pressed="false">警告 <span class="c-count{% if warn_n %} c-count--warning{% endif %}">{{ warn_n }}</span></button>
+            <button type="button" data-value="info" aria-pressed="false">情報 <span class="c-count">{{ info_n }}</span></button>
+          </div>
+        </div>
+      </header>
+      {% if events %}
+      <ol class="c-event-list" id="event-list">
+        {% for event in events %}
+        <li class="c-event" data-kind="{{ event.severity }}">
+          <span class="c-event__time" title="{{ event.created_at|localtime(tz) }}">{{ event.created_at|shorttime(tz) }}</span>
+          <span class="c-event__sev">{{ ui.status("severity", event.severity) }}</span>
+          {% if event.message|length > 160 %}
+          <div class="c-event__msg"><details><summary><span class="c-event__preview">{{ event.message[:150] }}…</span><span class="c-event__more">全文を表示</span></summary>{{ event.message }}</details></div>
+          {% else %}
+          <p class="c-event__msg">{{ event.message }}</p>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      <div data-filter-empty hidden>{{ ui.empty("circle-check", "該当するイベントはありません", compact=True) }}</div>
+      <p class="c-card__footer">最新 {{ events|length }} 件を表示しています。</p>
+      {% else %}
+      {{ ui.empty("history", "イベントはまだありません", compact=True) }}
+      {% endif %}
+    </section>
+  </div>
+
+  <div class="u-stack-lg">
+    <section class="c-card" aria-labelledby="versions-title">
+      <header class="c-card__header"><h2 class="c-card__title" id="versions-title">{{ ui.icon("server") }}コンポーネント</h2></header>
+      <div class="c-card__body">
+        <dl class="c-props">
+          {% for label, value in [("アプリ", versions.app), ("Streamlink", versions.streamlink), ("yt-dlp", versions.yt_dlp), ("TikTokLive", versions.tiktoklive), ("FFmpeg", versions.ffmpeg), ("ffprobe", versions.ffprobe)] %}
+          <dt>{{ label }}</dt>
+          <dd>{% if value %}<span class="u-mono u-small" title="{{ value }}">{{ value|truncate(48) }}</span>{% else %}<span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}未検出</span>{% endif %}</dd>
+          {% endfor %}
+        </dl>
+      </div>
+    </section>
+    <section class="c-card" aria-labelledby="integrations-title">
+      <header class="c-card__header"><h2 class="c-card__title" id="integrations-title">{{ ui.icon("key-round") }}外部連携</h2></header>
+      <div class="c-card__body">
+        <dl class="c-props">
+          <dt>TikTok 署名キー</dt>
+          <dd>{% if sign_key %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
+          <dt>ツイキャス認証</dt>
+          <dd>{% if twitcasting %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
+        </dl>
+        <p class="u-caption">値は環境変数で設定します。内容は表示しません。</p>
+      </div>
+    </section>
+  </div>
 </div>
-<h2>直近のイベント</h2>
-<ul>
-  {% for event in events %}
-  <li>{{ event.created_at|localtime(tz) }} [{{ event.severity }}] {{ event.message }}</li>
+
+{%- set categories = [
+  ("missing", "ファイル不足", "データベースに記録があるのに、保存先に存在しないファイルです。", report.missing if report else []),
+  ("size", "サイズ不一致", "記録されたサイズと実ファイルのサイズが異なります。", report.size_mismatch if report else []),
+  ("suspect", "破損の可能性", "検証で不正と判定されたファイルです。", report.suspect if report else []),
+  ("unregistered", "未登録ファイル", "保存先にあるが、データベースに記録がない動画ファイルです。", report.unregistered if report else []),
+  ("temporary", "未確定ファイル", "録画途中で残った一時ファイル（.part / .tmp）です。", report.temporary if report else []),
+] %}
+<section class="c-card" id="scan" aria-labelledby="scan-title"{% if report %} data-scroll-into-view{% endif %}>
+  <header class="c-card__header">
+    <div class="u-stack-sm">
+      <h2 class="c-card__title" id="scan-title">{{ ui.icon("scan-search") }}ファイル照合</h2>
+      <p class="c-card__subtitle">データベースの記録と保存先の実ファイルを照合します。ファイルの変更や削除は行いません。</p>
+    </div>
+    <form class="c-card__actions" method="post" action="/system/scan" data-busy>
+      {{ ui.csrf_input() }}
+      <button type="submit" class="c-btn{% if not report %} c-btn--primary{% endif %}">{{ ui.icon("scan-search", "sm") }}{{ "再照合する" if report else "保存先を照合する" }}</button>
+    </form>
+  </header>
+  {% if report %}
+  <div class="c-scan-summary">
+    <div class="c-scan-summary__item is-ok"><span class="c-scan-summary__label">{{ ui.icon("circle-check", "sm") }}正常</span><span class="c-scan-summary__value">{{ "{:,}".format(scan.ok) }}</span></div>
+    {% for key, label, desc, items in categories %}
+    <div class="c-scan-summary__item{% if items %} is-problem{% endif %}"><span class="c-scan-summary__label">{{ label }}</span><span class="c-scan-summary__value">{{ items|length }}</span></div>
+    {% endfor %}
+  </div>
+  <div data-tabs>
+    <div class="c-tabs" role="tablist" aria-label="照合結果の分類" hidden>
+      {% for key, label, desc, items in categories %}
+      <button type="button" class="c-tab" role="tab" id="scan-tab-{{ key }}" aria-controls="scan-panel-{{ key }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ label }} <span class="c-count{% if items %} c-count--warning{% endif %}">{{ items|length }}</span></button>
+      {% endfor %}
+    </div>
+    {% for key, label, desc, items in categories %}
+    <div role="tabpanel" id="scan-panel-{{ key }}" aria-labelledby="scan-tab-{{ key }}">
+      <div class="c-toolbar">
+        <p class="u-stack-sm"><strong class="u-sr-only">{{ label }}：</strong>{{ desc }}</p>
+        {% if items|length > 5 %}
+        <div class="c-toolbar__search c-search">
+          {{ ui.icon("search") }}
+          <label class="u-sr-only" for="scan-filter-{{ key }}">{{ label }}を絞り込む</label>
+          <input class="c-input c-input--mono" id="scan-filter-{{ key }}" type="search" placeholder="パスで絞り込み" autocomplete="off" data-filter-target="#scan-list-{{ key }}">
+        </div>
+        {% endif %}
+      </div>
+      {% if items %}
+      <ul class="c-path-list" id="scan-list-{{ key }}" tabindex="0" aria-label="{{ label }}の一覧">
+        {% for item in items %}<li data-search="{{ item }}">{{ item }}</li>{% endfor %}
+      </ul>
+      <div data-filter-empty hidden>{{ ui.empty("search", "一致するパスはありません", compact=True) }}</div>
+      {% if items|length >= 200 %}<p class="c-card__footer">{{ ui.icon("info", "sm") }}最大 200 件まで表示しています。</p>{% endif %}
+      {% else %}
+      {{ ui.empty("circle-check", "該当するファイルはありません", compact=True) }}
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <p class="c-card__footer">照合対象 {{ "{:,}".format(scan.checked) }} ファイル · {{ rendered_at|localtime(tz) }} に実行</p>
   {% else %}
-  <li class="muted">イベントはまだありません。</li>
-  {% endfor %}
-</ul>
-<h2>ファイル照合</h2>
-<form method="post" action="/system/scan">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <button type="submit">保存先を照合する</button>
-</form>
-{% if report %}
-  <h3>見つからないファイル</h3>
-  <ul>{% for item in report.missing %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
-  <h3>サイズ不一致</h3>
-  <ul>{% for item in report.size_mismatch %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
-  <h3>破損の可能性</h3>
-  <ul>{% for item in report.suspect %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
-  <h3>データベース未登録</h3>
-  <ul>{% for item in report.unregistered %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
-  <h3>未確定の一時ファイル</h3>
-  <ul>{% for item in report.temporary %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
-{% endif %}
+  <div class="c-card__body">
+    <p class="u-small u-muted">まだ照合していません。ファイル数が多い場合は完了まで時間がかかることがあります。</p>
+  </div>
+  {% endif %}
+</section>
 {% endblock %}

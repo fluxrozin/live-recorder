@@ -15,7 +15,7 @@ from live_recorder import __version__
 from live_recorder.cli import verify_password
 from live_recorder.comments.export import export_row, iter_jsonl, render_csv, render_txt
 from live_recorder.config import Settings, load_settings
-from live_recorder.db.models import Streamer
+from live_recorder.db.models import Streamer, StreamSession
 from live_recorder.db.repository import Repository, RepositoryError
 from live_recorder.db.runtime import (
     SettingsValidationError,
@@ -44,10 +44,20 @@ from live_recorder.platforms.normalize import (
 from live_recorder.recording.files import PathEscape, resolve_stored
 from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.process import command_output
-from live_recorder.timeutil import format_local, format_offset, start_of_local_day, utcnow
+from live_recorder.timeutil import (
+    ensure_aware,
+    format_local,
+    format_offset,
+    start_of_local_day,
+    utcnow,
+)
+from live_recorder.web import ui as ui_helpers
 
 BASE_DIR = Path(__file__).resolve().parent
+WORKER_OK_SECONDS = 45
+WORKER_STALE_SECONDS = 300
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+ui_helpers.register(templates, __version__)
 templates.env.filters["localtime"] = lambda value, tz: format_local(value, tz)
 templates.env.filters["offset"] = format_offset
 templates.env.filters["bytes"] = lambda value: format_bytes(value)
@@ -143,9 +153,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tz = request.app.state.settings.display_timezone
         context = {
             "csrf": csrf(request),
-            "flash": request.session.pop("flash", None),
+            "flash": _flash_payload(request.session.pop("flash", None)),
             "tz": tz,
             "username": request.session.get("username"),
+            "rendered_at": utcnow(),
             **extra,
         }
         return templates.TemplateResponse(request, name, context, status_code=status_code)
@@ -161,8 +172,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse("/login", status_code=303)
         return None
 
-    def flash(request: Request, message: str) -> None:
-        request.session["flash"] = message
+    def flash(request: Request, message: str, tone: str = "success") -> None:
+        request.session["flash"] = {"message": message, "tone": tone}
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request):
@@ -223,13 +234,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "status": job.status if job else "NONE",
                     }
                 )
+            since = utcnow() - timedelta(hours=24)
             error_rows = [
                 {"created_at": event.created_at, "message": event.message, "severity": event.severity}
                 for event in errors
+                if ensure_aware(event.created_at) >= since
             ]
-        from live_recorder.recording.finalize import disk_free, disk_total
-
-        root = request.app.state.settings.recordings_dir
+            active = await _active_sessions(session)
+            worker = _worker_health(await repo.latest_heartbeat())
+            last_checked = await _last_checked(repo)
+            monitored = len(await repo.monitored_streamers())
+        free, total = _disk_usage(request.app.state.settings.recordings_dir)
         return await render(
             request,
             "dashboard.html",
@@ -237,10 +252,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stats=stats,
             cards=cards,
             errors=error_rows,
-            free=disk_free(root),
-            total=disk_total(root),
+            free=free,
+            total=total,
+            used=(total - free) if free is not None and total is not None else None,
+            min_free=runtime.min_free_bytes,
             by_streamer=by_streamer,
+            active=active,
+            worker=worker,
+            last_checked=last_checked,
+            monitored=monitored,
             warning="",
+        )
+
+    @app.get("/partials/active-sessions", response_class=HTMLResponse)
+    async def active_sessions_partial(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        async with request.app.state.db.session() as session:
+            runtime = await load_runtime(session)
+            active = await _active_sessions(session)
+            worker = _worker_health(await Repository(session).latest_heartbeat())
+        return await render(
+            request,
+            "partials/active_sessions.html",
+            tz=runtime.display_timezone,
+            active=active,
+            worker=worker,
         )
 
     @app.get("/streamers", response_class=HTMLResponse)
@@ -258,16 +296,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return blocked
         form = dict(await request.form())
         check_csrf(request, form)
+        submitted = _submitted_streamer(form)
         try:
             platform, user_id, profile = _parse_account(str(form.get("platform") or ""), str(form.get("account") or ""))
         except NormalizeError as exc:
             rows = await _streamer_rows(request)
-            return await render(request, "streamers.html", rows=rows, error=str(exc), status_code=400)
+            return await render(
+                request, "streamers.html", rows=rows, error=str(exc), add_form=submitted, status_code=400
+            )
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             if await repo.find_streamer(platform, user_id):
                 rows = await _streamer_rows(request)
-                return await render(request, "streamers.html", rows=rows, error="同じ配信者は登録済みです", status_code=400)
+                return await render(
+                    request,
+                    "streamers.html",
+                    rows=rows,
+                    error="同じ配信者は登録済みです",
+                    add_form=submitted,
+                    status_code=400,
+                )
             streamer = Streamer(
                 platform=platform,
                 platform_user_id=user_id,
@@ -350,13 +398,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         form = dict(await request.form())
         check_csrf(request, form)
         if form.get("confirm") != "yes":
-            flash(request, "削除確認が必要です")
+            flash(request, "削除確認が必要です", "warning")
             return RedirectResponse("/streamers", status_code=303)
         async with request.app.state.db.session() as session:
             try:
                 await Repository(session).delete_streamer(streamer_id)
             except RepositoryError as exc:
-                flash(request, str(exc))
+                flash(request, str(exc), "danger")
                 return RedirectResponse("/streamers", status_code=303)
             await session.commit()
         flash(request, "配信者を削除しました")
@@ -420,6 +468,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             job = await repo.latest_recording(session_id)
             comment_job = await repo.latest_comment_job(session_id)
             gaps = await repo.gaps_for_session(session_id)
+            comments_total = await repo.comment_count(session_id)
+            root = request.app.state.settings.recordings_dir
             detail = {
                 "id": item.id,
                 "name": item.streamer.display_name,
@@ -438,6 +488,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "comment_received": comment_job.received_count if comment_job else 0,
                 "comment_stored": comment_job.stored_count if comment_job else 0,
                 "comment_errors": comment_job.error_count if comment_job else 0,
+                "comment_reconnects": comment_job.reconnect_count if comment_job else 0,
+                "comment_error": comment_job.last_error if comment_job else "",
+                "comment_last_received_at": comment_job.last_received_at if comment_job else None,
+                "comments_total": comments_total,
+                "recording_started_at": job.started_at if job else None,
+                "recording_finished_at": job.finished_at if job else None,
+                "recording_retries": job.retry_count if job else 0,
                 "segments": [
                     {
                         "id": segment.id,
@@ -449,6 +506,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "container": segment.container_format or "—",
                         "validation": segment.validation_status,
                         "removed": segment.file_removed,
+                        "exists": _stored_file_exists(root, segment.file_path) if not segment.file_removed else False,
                         "name": Path(segment.file_path).name,
                     }
                     for segment in segments
@@ -505,7 +563,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         form = dict(await request.form())
         check_csrf(request, form)
         if form.get("confirm") != "yes":
-            flash(request, "ファイル削除の確認が必要です")
+            flash(request, "ファイル削除の確認が必要です", "warning")
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
         async with request.app.state.db.session() as session:
             repo = Repository(session)
@@ -532,7 +590,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         form = dict(await request.form())
         check_csrf(request, form)
         if form.get("confirm") != "yes":
-            flash(request, "履歴削除の確認が必要です")
+            flash(request, "履歴削除の確認が必要です", "warning")
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
         delete_files_too = form.get("delete_files") == "yes"
         async with request.app.state.db.session() as session:
@@ -578,6 +636,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {
                     "when": comment.posted_at or comment.received_at,
                     "streamer": comment.session.streamer.display_name if comment.session and comment.session.streamer else "—",
+                    "platform": comment.session.streamer.platform if comment.session and comment.session.streamer else "",
                     "user_id": comment.platform_user_id or "—",
                     "nickname": comment.nickname or "—",
                     "message": comment.message,
@@ -751,6 +810,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         report = scan_storage(request.app.state.settings.recordings_dir, payload_segments)
         payload = await _system_payload(request, report)
+        problems = set(report.missing) | set(report.size_mismatch) | set(report.suspect)
+        checked = [item for item in payload_segments if not item["file_removed"]]
+        payload["scan"] = {
+            "checked": len(checked),
+            "ok": sum(1 for item in checked if item["file_path"] not in problems),
+        }
         return await render(request, "system.html", **payload)
 
     return app
@@ -758,6 +823,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def _checked(form: dict, name: str) -> bool:
     return str(form.get(name) or "").lower() in {"1", "true", "on", "yes"}
+
+
+def _flash_payload(value: object) -> dict | None:
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return {"message": str(value.get("message") or ""), "tone": str(value.get("tone") or "success")}
+    return {"message": str(value), "tone": "success"}
+
+
+def _submitted_streamer(form: dict) -> dict:
+    return {
+        "platform": str(form.get("platform") or ""),
+        "account": str(form.get("account") or ""),
+        "display_name": str(form.get("display_name") or ""),
+        "monitoring_enabled": _checked(form, "monitoring_enabled"),
+        "recording_enabled": _checked(form, "recording_enabled"),
+        "comments_enabled": _checked(form, "comments_enabled"),
+    }
+
+
+def _stored_file_exists(root: Path, relative: str) -> bool:
+    try:
+        return resolve_stored(root, relative).is_file()
+    except (PathEscape, OSError):
+        return False
+
+
+def _disk_usage(root: Path) -> tuple[int | None, int | None]:
+    from live_recorder.recording.finalize import disk_free, disk_total
+
+    try:
+        return disk_free(root), disk_total(root)
+    except OSError:
+        return None, None
+
+
+def _worker_health(heartbeat) -> dict:
+    """ハートビートの鮮度からワーカー状態を 正常 / 警告 / 異常 / 不明 に分類する。"""
+    if heartbeat is None:
+        return {"state": "unknown", "age": None, "status": None, "last_seen_at": None, "label": "未検出"}
+    age = int((utcnow() - ensure_aware(heartbeat.last_seen_at)).total_seconds())
+    if age <= WORKER_OK_SECONDS and heartbeat.status == "running":
+        state, label = "ok", "稼働中"
+    elif age <= WORKER_STALE_SECONDS:
+        state, label = "warning", "応答が遅れています" if heartbeat.status == "running" else str(heartbeat.status)
+    else:
+        state, label = "error", "停止または無応答"
+    return {"state": state, "age": age, "status": heartbeat.status, "last_seen_at": heartbeat.last_seen_at, "label": label}
+
+
+async def _last_checked(repo: Repository) -> datetime | None:
+    times = [item.last_checked_at for item in await repo.monitored_streamers() if item.last_checked_at]
+    return max(times) if times else None
+
+
+async def _active_sessions(session) -> list[dict]:
+    """配信中または終了処理中のセッションと、その録画・コメント収集ジョブの状態。"""
+    repo = Repository(session)
+    query = repo.session_query().where(StreamSession.status.in_(("LIVE", "ENDING")))
+    rows = []
+    for item in await session.scalars(query):
+        recording = await repo.latest_recording(item.id)
+        comments = await repo.latest_comment_job(item.id)
+        rows.append(
+            {
+                "id": item.id,
+                "name": item.streamer.display_name,
+                "platform": item.streamer.platform,
+                "user_id": item.streamer.platform_user_id,
+                "title": item.title or "",
+                "session_status": item.status,
+                "detected_at": item.detected_at,
+                "recording_status": recording.status if recording else "NONE",
+                "recording_started_at": recording.started_at if recording else None,
+                "recording_error": recording.last_error if recording else "",
+                "comment_status": comments.status if comments else "NONE",
+                "comment_received": comments.received_count if comments else 0,
+                "comment_last_received_at": comments.last_received_at if comments else None,
+            }
+        )
+    return rows
 
 
 def _parse_account(platform: str, account: str) -> tuple[str, str, str]:
@@ -784,6 +931,7 @@ def _streamer_dict(streamer: Streamer) -> dict:
         "last_checked_at": streamer.last_checked_at,
         "last_live_at": streamer.last_live_at,
         "last_recording_at": streamer.last_recording_at,
+        "last_error": streamer.last_error or "",
         "recording_state": "NONE",
         "comment_state": "NONE",
     }
@@ -865,12 +1013,33 @@ def _page(value: str | None) -> int:
 
 
 def _fallback_runtime(form: dict):
+    """検証エラーで再表示するとき、送信された値をそのままフォームへ戻す（既定値で上書きしない）。"""
+    from types import SimpleNamespace
+
     from live_recorder.db.runtime import RuntimeSettings
 
-    runtime = RuntimeSettings()
-    runtime.monitor_interval_seconds = int(form.get("monitor_interval_seconds") or 60)
-    runtime.display_timezone = str(form.get("display_timezone") or "Asia/Tokyo")
-    return runtime
+    defaults = RuntimeSettings()
+    try:
+        min_free_bytes = int(float(str(form.get("min_free_gib") or "0")) * 1024**3)
+    except ValueError:
+        min_free_bytes = defaults.min_free_bytes
+    order = [str(form.get(key) or "") for key in ("engine_1", "engine_2", "engine_3")]
+    return SimpleNamespace(
+        monitor_interval_seconds=form.get("monitor_interval_seconds", defaults.monitor_interval_seconds),
+        max_concurrent_recordings=form.get("max_concurrent_recordings", defaults.max_concurrent_recordings),
+        recording_quality=str(form.get("recording_quality") or defaults.recording_quality),
+        min_free_bytes=min_free_bytes,
+        retention_days=form.get("retention_days", defaults.retention_days),
+        auto_delete_enabled=_checked(form, "auto_delete_enabled"),
+        tiktok_engine_order=order,
+        comments_globally_enabled=_checked(form, "comments_globally_enabled"),
+        log_level=str(form.get("log_level") or defaults.log_level),
+        display_timezone=str(form.get("display_timezone") or ""),
+        comment_retention_days=form.get("comment_retention_days", defaults.comment_retention_days),
+        auto_export_on_complete=_checked(form, "auto_export_on_complete"),
+        reconnect_max_attempts=form.get("reconnect_max_attempts", defaults.reconnect_max_attempts),
+        comment_poll_seconds=form.get("comment_poll_seconds", defaults.comment_poll_seconds),
+    )
 
 
 async def _system_payload(request: Request, report) -> dict:
@@ -880,9 +1049,10 @@ async def _system_payload(request: Request, report) -> dict:
         runtime = await load_runtime(session)
         heartbeat = await repo.latest_heartbeat()
         engines = await repo.list_engines()
-        events = await repo.recent_events(20)
+        events = await repo.recent_events(50)
         checked = None
         streamers = await repo.monitored_streamers()
+        worker = _worker_health(heartbeat)
         if streamers:
             times = [item.last_checked_at for item in streamers if item.last_checked_at]
             checked = max(times) if times else None
@@ -912,21 +1082,20 @@ async def _system_payload(request: Request, report) -> dict:
         versions["tiktoklive"] = str(getattr(TikTokLive, "__version__", "installed"))
     except Exception:
         versions["tiktoklive"] = ""
-    age = None
-    worker_ok = False
-    if heartbeat is not None:
-        age = int((utcnow() - heartbeat.last_seen_at).total_seconds())
-        worker_ok = age <= 45 and heartbeat.status == "running"
     return {
         "tz": runtime.display_timezone,
         "versions": versions,
         "engines": engine_rows,
         "events": event_rows,
-        "worker_ok": worker_ok,
-        "worker_age": age,
+        "worker": worker,
+        "worker_ok": worker["state"] == "ok",
+        "worker_age": worker["age"],
         "db_ok": True,
         "last_checked": checked,
+        "monitor_interval": runtime.monitor_interval_seconds,
+        "monitored": len(streamers),
         "report": report,
+        "scan": None,
         "sign_key": bool(settings.sign_api_key),
         "twitcasting": settings.twitcasting_configured,
     }

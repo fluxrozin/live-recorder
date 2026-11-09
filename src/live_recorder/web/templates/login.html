@@ -1,15 +1,36 @@
 {% extends "base.html" %}
 {% block title %}ログイン{% endblock %}
-{% block content %}
-<section class="card login">
-  <h1>管理者ログイン</h1>
-  {% if error %}<p class="error">{{ error }}</p>{% endif %}
-  <form method="post" action="/login">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>ユーザー名 <input name="username" autocomplete="username" required></label>
-    <label>パスワード <input name="password" type="password" autocomplete="current-password" required></label>
-    <button type="submit">ログイン</button>
-  </form>
-  <p class="muted">初回の管理者はサーバ上で <code>python -m live_recorder.cli create-admin</code> を実行して作成します。</p>
-</section>
+{% block body %}
+<main class="l-auth" id="main">
+  <div class="c-auth-card">
+    <div class="c-auth-card__brand">
+      <span class="c-logo" aria-hidden="true"><span class="c-logo__dot"></span></span>
+      <div class="u-stack-sm">
+        <h1 class="c-auth-card__title">Live Recorder</h1>
+        <p class="c-auth-card__desc">ライブ配信の録画・コメント記録コンソールにログインします</p>
+      </div>
+    </div>
+
+    {% if error %}{{ ui.alert("danger", text=error, role="alert") }}{% endif %}
+
+    <form method="post" action="/login" class="u-stack" data-busy>
+      {{ ui.csrf_input() }}
+      <div class="c-field">
+        <label class="c-label" for="username">ユーザー名</label>
+        <input class="c-input" id="username" name="username" autocomplete="username" required autofocus autocapitalize="none" spellcheck="false"{% if error %} aria-invalid="true" aria-describedby="login-error"{% endif %}>
+      </div>
+      <div class="c-field">
+        <label class="c-label" for="password">パスワード</label>
+        <div class="c-input-group">
+          <input class="c-input" id="password" name="password" type="password" autocomplete="current-password" required{% if error %} aria-invalid="true"{% endif %}>
+          <button type="button" class="c-input-group__button" data-password-toggle aria-controls="password" aria-pressed="false" aria-label="パスワードを表示">{{ ui.icon("eye") }}</button>
+        </div>
+      </div>
+      {% if error %}<p class="u-sr-only" id="login-error">{{ error }}</p>{% endif %}
+      <button type="submit" class="c-btn c-btn--primary c-btn--block">ログイン</button>
+    </form>
+
+    <p class="c-auth-card__foot">管理者アカウントはサーバー上で作成します。初回は <code>python -m live_recorder.cli create-admin</code> を実行してください。</p>
+  </div>
+</main>
 {% endblock %}
