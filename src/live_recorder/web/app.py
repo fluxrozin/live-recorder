@@ -66,6 +66,14 @@ from live_recorder.web import ui as ui_helpers
 BASE_DIR = Path(__file__).resolve().parent
 WORKER_OK_SECONDS = 45
 WORKER_STALE_SECONDS = 300
+SETTINGS_TABS = {
+    "settings-general",
+    "settings-recording",
+    "settings-tiktok",
+    "settings-comments",
+    "settings-advanced",
+    "settings-environment",
+}
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 ui_helpers.register(templates, __version__)
 templates.env.filters["localtime"] = lambda value, tz: format_local(value, tz)
@@ -76,6 +84,11 @@ templates.env.filters["rec_label"] = lambda value: RECORDING_STATUS_JA.get(value
 templates.env.filters["com_label"] = lambda value: COMMENT_STATUS_JA.get(value or "NONE", value or "—")
 templates.env.filters["session_label"] = lambda value: SESSION_STATUS_JA.get(value or "", value or "—")
 templates.env.filters["platform_label"] = lambda value: PLATFORM_JA.get(value or "", value or "—")
+
+
+def settings_tab(form: dict) -> str:
+    tab = str(form.get("active_tab") or "")
+    return tab if tab in SETTINGS_TABS else ""
 
 
 def format_bytes(size: object) -> str:
@@ -708,6 +721,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "settings.html",
             runtime=runtime,
             error="",
+            active_tab="",
             env={
                 "recordings_dir": str(env.recordings_dir),
                 "web_port": env.web_port,
@@ -724,6 +738,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return blocked
         form = dict(await request.form())
         check_csrf(request, form)
+        active_tab = settings_tab(form)
         order = [str(form.get(key) or "") for key in ("engine_1", "engine_2", "engine_3")]
         order = [item for item in order if item]
         try:
@@ -752,6 +767,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "settings.html",
                 runtime=_fallback_runtime(form),
                 error=str(exc),
+                active_tab=active_tab,
                 env={
                     "recordings_dir": str(env.recordings_dir),
                     "web_port": env.web_port,
@@ -766,7 +782,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await Repository(session).add_event("settings_updated", "即時反映の設定を更新しました")
             await session.commit()
         flash(request, "設定を保存しました。保存先と秘密情報の変更は環境変数を更新して再起動してください")
-        return RedirectResponse("/settings", status_code=303)
+        target = f"/settings#{active_tab}" if active_tab else "/settings"
+        return RedirectResponse(target, status_code=303)
 
     @app.get("/system", response_class=HTMLResponse)
     async def system_page(request: Request):

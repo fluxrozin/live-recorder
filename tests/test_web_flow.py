@@ -261,14 +261,39 @@ def test_settings_roundtrip_and_validation_keep_values(client):
         "log_level": selected("log_level"),
         "comments_globally_enabled": "on",
     }
-    saved = client.post("/settings", data=form, follow_redirects=True)
-    assert saved.status_code == 200 and "設定を保存しました" in saved.text
+    saved = client.post(
+        "/settings", data={**form, "active_tab": "settings-comments"}, follow_redirects=False
+    )
+    assert saved.status_code == 303
+    assert saved.headers["location"] == "/settings#settings-comments"
+    shown = client.get("/settings")
+    assert shown.status_code == 200 and "設定を保存しました" in shown.text
+    rejected = client.post(
+        "/settings", data={**form, "active_tab": "https://evil.example"}, follow_redirects=False
+    )
+    assert rejected.headers["location"] == "/settings"
     invalid = client.post(
-        "/settings", data={**form, "monitor_interval_seconds": "1", "display_timezone": "UTC"}
+        "/settings",
+        data={
+            **form,
+            "active_tab": "settings-recording",
+            "monitor_interval_seconds": "1",
+            "display_timezone": "UTC",
+        },
     )
     assert invalid.status_code == 400
     assert re.search(r'name="display_timezone"[^>]*value="UTC"', invalid.text)
     assert re.search(r'name="monitor_interval_seconds"[^>]*value="1"', invalid.text)
+    assert re.search(r'id="tab-recording"[^>]*aria-selected="true"', invalid.text)
+    assert re.search(r'id="tab-general"[^>]*aria-selected="false"', invalid.text)
+    assert re.search(r'name="active_tab"[^>]*value="settings-recording"', invalid.text)
+    tampered = client.post(
+        "/settings",
+        data={**form, "active_tab": '"><script>', "monitor_interval_seconds": "1"},
+    )
+    assert tampered.status_code == 400
+    assert '"><script>' not in tampered.text
+    assert re.search(r'id="tab-general"[^>]*aria-selected="true"', tampered.text)
 
 
 def test_comment_partial_and_export_keep_filters(client):

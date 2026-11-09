@@ -11,7 +11,7 @@ import pytest
 import ui_fixtures as fx
 from live_recorder.config import Settings
 from live_recorder.web import ui
-from live_recorder.web.app import _fallback_runtime, create_app, templates
+from live_recorder.web.app import _fallback_runtime, create_app, settings_tab, templates
 
 CASES = [(name, scenario) for name in fx.PAGES for scenario in fx.SCENARIOS]
 
@@ -343,6 +343,23 @@ def test_settings_fallback_preserves_submitted_values():
     assert 'value="5"' in html and 'value="UTC"' in html
     assert re.search(r'name="engine_1"[\s\S]*?value="yt-dlp" selected', html)
     assert "監視間隔は30秒以上" in html
+
+
+def test_settings_tab_accepts_only_known_panels():
+    assert settings_tab({"active_tab": "settings-comments"}) == "settings-comments"
+    assert settings_tab({"active_tab": "https://evil.example"}) == ""
+    assert settings_tab({"active_tab": "settings-general#@evil"}) == ""
+    assert settings_tab({}) == ""
+
+
+def test_settings_restore_open_tab_after_validation_error():
+    html = render(
+        "settings.html",
+        {**fx.settings_context("normal", error="監視間隔は30秒以上"), "active_tab": "settings-tiktok"},
+    )
+    assert re.search(r'id="tab-tiktok"[^>]*aria-selected="true"', html)
+    assert re.search(r'id="tab-general"[^>]*aria-selected="false"', html)
+    assert re.search(r'name="active_tab"[^>]*value="settings-tiktok"', html)
 
 
 def test_environment_values_are_read_only_and_hide_secrets():

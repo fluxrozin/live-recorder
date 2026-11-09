@@ -53,12 +53,14 @@
   ("advanced", "詳細", "Advanced", "sliders-horizontal"),
   ("environment", "環境", "Environment", "server"),
 ] %}
+{%- set current_tab = active_tab|default('') %}
 
 <form method="post" action="/settings" class="l-settings" data-tabs data-tabs-hash data-dirty-form data-busy aria-label="設定">
   {{ ui.csrf_input() }}
+  <input type="hidden" name="active_tab" value="{{ current_tab }}">
   <div class="c-settings-nav" role="tablist" aria-label="設定カテゴリ" aria-orientation="vertical" hidden>
     {% for key, label, en, icon_name in sections %}
-    <button type="button" class="c-tab" role="tab" id="tab-{{ key }}" aria-controls="settings-{{ key }}" aria-selected="{{ 'true' if loop.first else 'false' }}">
+    <button type="button" class="c-tab" role="tab" id="tab-{{ key }}" aria-controls="settings-{{ key }}" aria-selected="{{ 'true' if current_tab == 'settings-' ~ key or (not current_tab and loop.first) else 'false' }}">
       {{ ui.icon(icon_name) }}<span>{{ label }}</span>
       <span class="c-dirty-dot" data-dirty-dot="settings-{{ key }}" hidden><span class="u-sr-only">（未保存の変更あり）</span></span>
     </button>

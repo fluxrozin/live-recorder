@@ -534,8 +534,11 @@
           if (panel) panel.hidden = !selected;
         });
         if (focus) tab.focus();
+        var panelId = tab.getAttribute("aria-controls") || "";
+        var remembered = $("input[name='active_tab']", container);
+        if (remembered) remembered.value = panelId;
         if (useHash && !keepHash && window.history.replaceState) {
-          window.history.replaceState(null, "", "#" + tab.getAttribute("aria-controls"));
+          window.history.replaceState(null, "", "#" + panelId);
         }
       }
 
