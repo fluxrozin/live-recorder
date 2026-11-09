@@ -12,11 +12,14 @@
 {% set eyebrow %}{{ ui.platform(detail.platform) }}<span class="u-mono u-truncate">{{ detail.user_id }}</span><span class="u-subtle">· #{{ detail.id }}</span>{% endset %}
 {% call ui.page_header(detail.name, detail.title if detail.title != "—" else "タイトルなし", eyebrow=eyebrow) %}
   <a class="c-btn" href="/comments?session_id={{ detail.id }}">{{ ui.icon("message-square-text") }}コメントを見る<span class="c-count">{{ "{:,}".format(detail.comments_total) }}</span></a>
-  {% call ui.menu_button("export-menu", "エクスポート", header="この配信のコメント " ~ "{:,}".format(detail.comments_total) ~ " 件をすべて出力します", icon_name="chevron-down") %}
-    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;format=jsonl" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">機械処理向け</span></a>
-    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;format=csv" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">Excel向け</span></a>
-    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;format=txt" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">閲覧向け</span></a>
+  {% if detail.segments|length <= 1 %}
+  {% set only_id = detail.segments[0].id if detail.segments else none %}
+  {% call ui.menu_button("export-menu", "エクスポート", header="この配信のコメント " ~ "{:,}".format(detail.comments_total) ~ " 件を、録画ファイルと同じ名前で出力します", icon_name="chevron-down") %}
+    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}{% if only_id %}&amp;segment_id={{ only_id }}{% endif %}&amp;format=jsonl" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">機械処理向け</span></a>
+    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}{% if only_id %}&amp;segment_id={{ only_id }}{% endif %}&amp;format=csv" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">Excel向け</span></a>
+    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}{% if only_id %}&amp;segment_id={{ only_id }}{% endif %}&amp;format=txt" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">閲覧向け</span></a>
   {% endcall %}
+  {% endif %}
 {% endcall %}
 
 <div class="u-row u-row--wrap">
@@ -81,7 +84,7 @@
 <section class="c-card" aria-labelledby="files-title">
   <header class="c-card__header">
     <h2 class="c-card__title" id="files-title">{{ ui.icon("file-video") }}録画ファイル <span class="c-count">{{ detail.segments|length }}</span></h2>
-    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれます。</p>
+    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれ、コメントも同じ名前でセグメントごとに出力します。</p>
   </header>
   {% if detail.segments %}
   <div class="c-table-wrap">
@@ -119,6 +122,11 @@
             {% else %}
             <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/download" download aria-label="{{ segment.name }} をダウンロード（{{ segment.size|bytes }}）">{{ ui.icon("download", "sm") }}ダウンロード</a>
             {% endif %}
+            {% call ui.menu_button("segment-comments-" ~ segment.id, "コメント", variant="sm", icon_name="download") %}
+              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=jsonl" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">録画と同じ名前</span></a>
+              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=csv" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">録画と同じ名前</span></a>
+              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=txt" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">録画と同じ名前</span></a>
+            {% endcall %}
           </td>
         </tr>
         {% endfor %}
@@ -185,7 +193,7 @@
 
 {% call ui.confirm_dialog("delete-files", "録画ファイルを削除", "/recordings/" ~ detail.id ~ "/delete-files", "ファイルを削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="録画ファイルが元に戻せないことを理解しました", icon_name="file-video") %}
   <div class="c-impact">
-    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）を保存先から削除") }}
+    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）と、同じ名前のコメントファイルを保存先から削除") }}
     {{ ui.impact("keep", "録画履歴とコメント " ~ "{:,}".format(detail.comments_total) ~ " 件は残ります") }}
   </div>
 {% endcall %}

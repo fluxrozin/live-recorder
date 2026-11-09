@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from live_recorder.recording.finalize import allow_new_recording, finalize_recording
+from live_recorder.recording.finalize import (
+    allow_new_recording,
+    container_name,
+    finalize_recording,
+    remux_args,
+)
 from live_recorder.recording.process import run_process
 
 
@@ -80,5 +85,55 @@ async def test_finalize_remuxes_local_mpegts(tmp_path: Path):
     final = await finalize_recording(ffmpeg, "ffprobe", source)
     assert final.validation == "ok"
     assert final.path.suffix == ".mp4"
+    assert final.container == "mp4"
     assert final.size > 0
     assert final.duration_ms and final.duration_ms > 0
+
+
+def test_container_name_collapses_ffprobe_labels():
+    assert container_name("mov,mp4,m4a,3gp,3g2,mj2") == "mp4"
+    assert container_name("flv") == "flv"
+    assert container_name("mpegts") == "mpegts"
+    assert container_name(None) is None
+
+
+def test_hevc_remux_uses_hvc1_tag(tmp_path: Path):
+    source = tmp_path / "seg.ts"
+    target = tmp_path / "seg.mp4"
+    hevc = remux_args("ffmpeg", source, target, "hevc")
+    h264 = remux_args("ffmpeg", source, target, "h264")
+    assert hevc[hevc.index("-tag:v") + 1] == "hvc1"
+    assert "-tag:v" not in h264
+    assert hevc[-1] == str(target)
+
+
+async def test_failed_remux_removes_empty_mp4(tmp_path: Path):
+    source = tmp_path / "seg.ts"
+    source.write_bytes(b"\x00" * 2048)
+    empty = tmp_path / "seg.mp4"
+    empty.write_bytes(b"")
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        '{"streams":[{"codec_type":"video","codec_name":"h264"},'
+        '{"codec_type":"audio","codec_name":"aac"}],'
+        '"format":{"format_name":"mpegts","duration":"1.5"}}\n'
+        "EOF\n",
+        encoding="utf-8",
+    )
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.write_text(
+        "#!/bin/sh\n"
+        'target="${@: -1}"\n'
+        ': > "$target"\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    ffprobe.chmod(0o755)
+    ffmpeg.chmod(0o755)
+    final = await finalize_recording(str(ffmpeg), str(ffprobe), source)
+    assert final.path == source
+    assert final.validation == "ok"
+    assert final.container == "mpegts"
+    assert not empty.exists()

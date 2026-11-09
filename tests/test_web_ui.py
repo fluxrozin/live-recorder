@@ -272,6 +272,8 @@ def test_segment_download_only_when_file_exists():
     assert "/segments/2/download" not in html
     assert "/segments/3/download" not in html
     assert "ファイルなし" in html and "削除済み" in html
+    for segment_id in (1, 2, 3):
+        assert f"segment_id={segment_id}&amp;format=jsonl" in html
 
 
 SETTINGS_FIELDS = {

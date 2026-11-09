@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import secrets
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,7 +15,14 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from live_recorder import __version__
 from live_recorder.cli import verify_password
-from live_recorder.comments.export import export_row, iter_jsonl, render_csv, render_txt
+from live_recorder.comments.export import encode_export, export_row
+from live_recorder.comments.segments import (
+    ExportSegment,
+    comment_export_name,
+    comment_sidecar_relatives,
+    partition_by_segment,
+    segment_offset_ms,
+)
 from live_recorder.config import Settings, load_settings
 from live_recorder.db.models import Streamer, StreamSession
 from live_recorder.db.repository import Repository, RepositoryError
@@ -576,6 +585,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     continue
                 if path.is_file():
                     path.unlink()
+                _unlink_comment_sidecars(path)
                 segment.file_removed = True
             await repo.add_event("file_deleted", "録画ファイルを削除しました", session_id=session_id)
             await session.commit()
@@ -601,14 +611,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             segments = await repo.segments_for_session(session_id)
             comment_job = await repo.latest_comment_job(session_id)
             export_path = comment_job.export_path if comment_job else None
-            if delete_files_too:
-                for segment in segments:
-                    try:
-                        path = resolve_stored(request.app.state.settings.recordings_dir, segment.file_path)
-                    except PathEscape:
-                        continue
-                    if path.is_file():
-                        path.unlink()
+            for segment in segments:
+                try:
+                    path = resolve_stored(request.app.state.settings.recordings_dir, segment.file_path)
+                except PathEscape:
+                    continue
+                if delete_files_too and path.is_file():
+                    path.unlink()
+                _unlink_comment_sidecars(path)
             if export_path:
                 try:
                     path = resolve_stored(request.app.state.settings.recordings_dir, export_path)
@@ -669,41 +679,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         kind = str(request.query_params.get("format") or "jsonl")
         if kind not in {"jsonl", "csv", "txt"}:
             raise HTTPException(400)
+        segment_raw = request.query_params.get("segment_id") or ""
+        segment_id = int(segment_raw) if segment_raw.isdigit() else None
+        if segment_raw and segment_id is None:
+            raise HTTPException(400)
         async with request.app.state.db.session() as session:
             repo = Repository(session)
+            windows, selected = await _export_windows(repo, filters["query"], segment_id)
             found = await repo.export_comments(**filters["query"])
-            rows = []
-            for comment in found:
-                stream = comment.session
-                rows.append(
-                    export_row(
-                        posted_at=comment.posted_at,
-                        received_at=comment.received_at,
-                        timezone_name=tz,
-                        user_id=comment.platform_user_id,
-                        nickname=comment.nickname,
-                        message=comment.message,
-                        platform=stream.streamer.platform if stream and stream.streamer else "",
-                        stream_id=stream.platform_stream_id if stream else None,
-                        recording_offset_ms=comment.recording_offset_ms,
-                        stream_offset_ms=comment.stream_offset_ms,
-                        platform_comment_id=comment.platform_comment_id,
-                    )
-                )
-        if kind == "csv":
-            body = "\ufeff" + render_csv(rows)
-            media = "text/csv; charset=utf-8"
-            filename = "comments.csv"
-        elif kind == "txt":
-            body = render_txt(rows)
-            media = "text/plain; charset=utf-8"
-            filename = "comments.txt"
-        else:
-            body = "".join(iter_jsonl(rows))
-            media = "application/x-ndjson; charset=utf-8"
-            filename = "comments.jsonl"
+            body, media, filename = _comment_download(found, windows, selected, kind, tz)
         return Response(
-            content=body.encode("utf-8"),
+            content=body,
             media_type=media,
             headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
         )
@@ -983,6 +969,101 @@ def _recording_filters(request: Request, tz: str) -> dict:
         "end": _parse_day(params.get("end") or "", tz, end=True),
     }
     return {"page": page, "query": query, "raw": {key: params.get(key) or "" for key in ("streamer_id", "platform", "status", "start", "end")}}
+
+
+def _window(segment) -> ExportSegment:
+    return ExportSegment(
+        id=segment.id,
+        number=segment.segment_number,
+        file_name=Path(segment.file_path).name,
+        started_at=segment.started_at,
+    )
+
+
+async def _export_windows(repo: Repository, query: dict, segment_id: int | None) -> tuple[list[ExportSegment], int | None]:
+    session_id = query.get("session_id")
+    selected = None
+    if segment_id is not None:
+        found = await repo.segment_with_session(segment_id)
+        if found is None:
+            raise HTTPException(404)
+        _segment, owner = found
+        if session_id is not None and session_id != owner:
+            raise HTTPException(404)
+        query["session_id"] = owner
+        session_id = owner
+        selected = segment_id
+    if not session_id:
+        return [], None
+    windows = [_window(segment) for segment in await repo.segments_for_session(session_id)]
+    if selected is not None and all(item.id != selected for item in windows):
+        raise HTTPException(404)
+    return windows, selected
+
+
+def _comment_row(comment, tz: str, recording_offset_ms: int | None) -> dict[str, object]:
+    stream = comment.session
+    return export_row(
+        posted_at=comment.posted_at,
+        received_at=comment.received_at,
+        timezone_name=tz,
+        user_id=comment.platform_user_id,
+        nickname=comment.nickname,
+        message=comment.message,
+        platform=stream.streamer.platform if stream and stream.streamer else "",
+        stream_id=stream.platform_stream_id if stream else None,
+        recording_offset_ms=recording_offset_ms,
+        stream_offset_ms=comment.stream_offset_ms,
+        platform_comment_id=comment.platform_comment_id,
+    )
+
+
+def _comment_download(comments, windows, selected: int | None, kind: str, tz: str) -> tuple[bytes, str, str]:
+    if not windows:
+        rows = [_comment_row(comment, tz, comment.recording_offset_ms) for comment in comments]
+        body, media = encode_export(kind, rows)
+        return body, media, f"comments.{kind}"
+    groups = partition_by_segment(comments, windows, lambda comment: comment.posted_at or comment.received_at)
+    if selected is not None:
+        groups = [(window, grouped) for window, grouped in groups if window.id == selected]
+    if len(groups) == 1:
+        window, grouped = groups[0]
+        rows = [
+            _comment_row(
+                comment,
+                tz,
+                segment_offset_ms(comment.posted_at or comment.received_at, window.started_at),
+            )
+            for comment in grouped
+        ]
+        body, media = encode_export(kind, rows)
+        return body, media, comment_export_name(window.file_name, kind)
+    buffer = io.BytesIO()
+    used: set[str] = set()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for window, grouped in groups:
+            name = comment_export_name(window.file_name, kind)
+            if name in used:
+                name = f"{Path(name).stem}_{window.id}{Path(name).suffix}"
+            used.add(name)
+            rows = [
+                _comment_row(
+                    comment,
+                    tz,
+                    segment_offset_ms(comment.posted_at or comment.received_at, window.started_at),
+                )
+                for comment in grouped
+            ]
+            payload, _media = encode_export(kind, rows)
+            archive.writestr(name, payload)
+    return buffer.getvalue(), "application/zip", "comments.zip"
+
+
+def _unlink_comment_sidecars(video: Path) -> None:
+    for relative in comment_sidecar_relatives(video.name):
+        extra = video.with_name(Path(relative).name)
+        if extra.is_file():
+            extra.unlink()
 
 
 def _comment_filters(request: Request, tz: str) -> dict:

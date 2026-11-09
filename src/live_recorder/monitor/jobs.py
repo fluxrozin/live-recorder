@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from live_recorder.comments.export import export_row, iter_jsonl
+from live_recorder.comments.segments import (
+    ExportSegment,
+    comment_export_name,
+    partition_by_segment,
+    segment_offset_ms,
+)
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import load_runtime
@@ -624,33 +630,92 @@ def obs_restricted(observation) -> bool:
     return bool(getattr(observation, "restricted", False))
 
 
+def _comment_row(comment, tz_name: str, stream, recording_offset_ms: int | None):
+    return export_row(
+        posted_at=comment.posted_at,
+        received_at=comment.received_at,
+        timezone_name=tz_name,
+        user_id=comment.platform_user_id,
+        nickname=comment.nickname,
+        message=comment.message,
+        platform=stream.streamer.platform if stream and stream.streamer else "",
+        stream_id=stream.platform_stream_id if stream else None,
+        recording_offset_ms=recording_offset_ms,
+        stream_offset_ms=comment.stream_offset_ms,
+        platform_comment_id=comment.platform_comment_id,
+    )
+
+
+def _write_comment_file(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(iter_jsonl(rows)), encoding="utf-8")
+
+
 async def _auto_export(settings: Settings, repo: Repository, session_id: int, job, tz_name: str) -> None:
     try:
         stream = await repo.get_session(session_id)
-        comments = await repo.export_comments(session_id=session_id, text=None, user_id=None, nickname=None, streamer_id=None, platform=None, start=None, end=None)
-        rows = [
-            export_row(
-                posted_at=comment.posted_at,
-                received_at=comment.received_at,
-                timezone_name=tz_name,
-                user_id=comment.platform_user_id,
-                nickname=comment.nickname,
-                message=comment.message,
-                platform=stream.streamer.platform if stream else "",
-                stream_id=stream.platform_stream_id if stream else None,
-                recording_offset_ms=comment.recording_offset_ms,
-                stream_offset_ms=comment.stream_offset_ms,
-                platform_comment_id=comment.platform_comment_id,
+        comments = await repo.export_comments(
+            session_id=session_id,
+            text=None,
+            user_id=None,
+            nickname=None,
+            streamer_id=None,
+            platform=None,
+            start=None,
+            end=None,
+        )
+        stored = [segment for segment in await repo.segments_for_session(session_id) if not segment.file_removed]
+        windows = [
+            ExportSegment(
+                id=segment.id,
+                number=segment.segment_number,
+                file_name=Path(segment.file_path).name,
+                started_at=segment.started_at,
             )
-            for comment in comments
+            for segment in stored
         ]
-        target = settings.recordings_dir / "exports" / f"session-{session_id}.jsonl"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("".join(iter_jsonl(rows)), encoding="utf-8")
-        job.export_path = relative_to_root(settings.recordings_dir, target)
+        written: list[Path] = []
+        if windows:
+            groups = partition_by_segment(
+                comments,
+                windows,
+                lambda comment: comment.posted_at or comment.received_at,
+            )
+            by_id = {segment.id: segment for segment in stored}
+            for window, grouped in groups:
+                if not grouped:
+                    continue
+                segment = by_id[window.id]
+                video = resolve_stored(settings.recordings_dir, segment.file_path)
+                target = video.with_name(comment_export_name(window.file_name, "jsonl"))
+                rows = [
+                    _comment_row(
+                        comment,
+                        tz_name,
+                        stream,
+                        segment_offset_ms(comment.posted_at or comment.received_at, window.started_at),
+                    )
+                    for comment in grouped
+                ]
+                _write_comment_file(target, rows)
+                written.append(target)
+        else:
+            rows = [
+                _comment_row(comment, tz_name, stream, comment.recording_offset_ms) for comment in comments
+            ]
+            target = settings.recordings_dir / "exports" / f"session-{session_id}.jsonl"
+            _write_comment_file(target, rows)
+            written.append(target)
+        if written:
+            job.export_path = relative_to_root(settings.recordings_dir, written[0])
     except Exception:
         log.exception("auto export failed")
-        await repo.add_event("comments_failed", "自動エクスポートに失敗しました。コメント本体は残しています", severity="warning", session_id=session_id)
+        await repo.add_event(
+            "comments_failed",
+            "自動エクスポートに失敗しました。コメント本体は残しています",
+            severity="warning",
+            session_id=session_id,
+        )
 
 
 async def close_recording_if_idle(

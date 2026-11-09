@@ -133,7 +133,7 @@
       {{ panel_header("settings-comments", "コメント", "Comments", "コメント収集と、収集したコメントの保存に関する設定です。") }}
       {{ switch_setting("comments_globally_enabled", "コメント収集を有効にする", runtime.comments_globally_enabled, "OFF にすると、配信者ごとの設定にかかわらずコメントを収集しません。") }}
       {{ number_setting("comment_retention_days", "コメントの保存期限", runtime.comment_retention_days, "コメントを保存しておく日数です。0 は無期限です。", "日", min=0) }}
-      {{ switch_setting("auto_export_on_complete", "完了時に自動エクスポート", runtime.auto_export_on_complete, "コメント収集が完了したとき、JSONL ファイルを自動で書き出します。") }}
+      {{ switch_setting("auto_export_on_complete", "完了時に自動エクスポート", runtime.auto_export_on_complete, "コメント収集が完了したとき、録画ファイルと同じ名前の JSONL をセグメントごとに書き出します。") }}
       {{ number_setting("comment_poll_seconds", "ツイキャスのコメント取得間隔", runtime.comment_poll_seconds, "ツイキャス API からコメントを取得する間隔です（5〜120秒）。", "秒", min=5, max=120) }}
     </section>
 

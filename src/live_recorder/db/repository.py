@@ -423,6 +423,19 @@ class Repository:
     async def get_segment(self, segment_id: int) -> RecordingSegment | None:
         return await self.session.get(RecordingSegment, segment_id)
 
+    async def segment_with_session(self, segment_id: int) -> tuple[RecordingSegment, int] | None:
+        row = (
+            await self.session.execute(
+                select(RecordingSegment, RecordingJob.stream_session_id)
+                .join(RecordingJob, RecordingSegment.recording_job_id == RecordingJob.id)
+                .where(RecordingSegment.id == segment_id)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        segment, session_id = row
+        return segment, int(session_id)
+
     async def comment_count(self, session_id: int) -> int:
         return int(
             await self.session.scalar(

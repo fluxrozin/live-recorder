@@ -3,6 +3,13 @@ from datetime import datetime, timezone
 from live_recorder.comments.dedupe import dedupe_key
 from live_recorder.comments.export import csv_safe, escape_log_text, render_csv, render_txt
 from live_recorder.comments.offsets import offsets
+from live_recorder.comments.segments import (
+    ExportSegment,
+    assign_segment,
+    comment_export_name,
+    partition_by_segment,
+    segment_offset_ms,
+)
 from live_recorder.timeutil import parse_platform_time
 
 
@@ -101,3 +108,29 @@ def test_csv_formula_and_newline_escape():
     assert log == "[00:00:12] user_a: 一行目\\n二行目\n"
     assert "\n二" not in log.split("user_a: ", 1)[1].replace("\\n", "")
     assert escape_log_text("a\nb") == "a\\nb"
+
+
+def test_comment_export_uses_recording_stem():
+    video = "tiktok_krk__rmn_nostream_20261109_200621_seg01.mp4"
+    assert comment_export_name(video, "jsonl") == "tiktok_krk__rmn_nostream_20261109_200621_seg01.jsonl"
+    assert comment_export_name(video, "csv") == "tiktok_krk__rmn_nostream_20261109_200621_seg01.csv"
+    assert comment_export_name("../comments.mp4", "txt") == "comments.txt"
+
+
+def test_comments_split_across_segments_and_offsets():
+    start = datetime(2026, 11, 9, 11, 6, 21, tzinfo=timezone.utc)
+    later = datetime(2026, 11, 9, 11, 20, 0, tzinfo=timezone.utc)
+    first = ExportSegment(1, 1, "seg01.mp4", start)
+    second = ExportSegment(2, 2, "seg02.mp4", later)
+    early = datetime(2026, 11, 9, 11, 6, 0, tzinfo=timezone.utc)
+    during_first = datetime(2026, 11, 9, 11, 10, 0, tzinfo=timezone.utc)
+    during_second = datetime(2026, 11, 9, 11, 21, 0, tzinfo=timezone.utc)
+    assert assign_segment(early, [second, first]).id == 1
+    assert assign_segment(during_second, [first, second]).id == 2
+    grouped = partition_by_segment(
+        [("a", early), ("b", during_first), ("c", during_second)],
+        [second, first],
+        lambda item: item[1],
+    )
+    assert [len(items) for _segment, items in grouped] == [2, 1]
+    assert segment_offset_ms(during_first, start) == 219_000

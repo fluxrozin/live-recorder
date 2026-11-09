@@ -9,6 +9,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
+from live_recorder.comments.segments import comment_sidecar_relatives
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import ensure_runtime, load_runtime
@@ -439,6 +440,9 @@ class Supervisor:
                         if job.export_path:
                             self._unlink_recorded(job.export_path)
                             job.export_path = None
+                        for segment in await repo.segments_for_session(job.stream_session_id):
+                            for relative in comment_sidecar_relatives(segment.file_path):
+                                self._unlink_recorded(relative)
                     await repo.add_event("maintenance", f"期限を過ぎたコメント {removed} 件と自動エクスポートを削除しました")
             await session.commit()
 

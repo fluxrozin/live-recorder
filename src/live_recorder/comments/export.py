@@ -68,6 +68,19 @@ def render_txt(rows: Iterable[dict[str, object]]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def encode_export(kind: str, rows: Iterable[dict[str, object]]) -> tuple[bytes, str]:
+    if kind == "csv":
+        text = "\ufeff" + render_csv(rows)
+        media = "text/csv; charset=utf-8"
+    elif kind == "txt":
+        text = render_txt(rows)
+        media = "text/plain; charset=utf-8"
+    else:
+        text = "".join(iter_jsonl(rows))
+        media = "application/x-ndjson; charset=utf-8"
+    return text.encode("utf-8"), media
+
+
 def export_row(
     *,
     posted_at: datetime | None,
