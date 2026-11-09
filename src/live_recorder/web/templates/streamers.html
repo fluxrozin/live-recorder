@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}配信者{% endblock %}
+{% block content %}
+<h1>配信者</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form class="card" method="post" action="/streamers">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <h2>追加</h2>
+  <label>プラットフォーム
+    <select name="platform" required>
+      <option value="tiktok">TikTok</option>
+      <option value="twitcasting">ツイキャス</option>
+    </select>
+  </label>
+  <label>ユーザーID、@名前、またはプロフィールURL <input name="account" required></label>
+  <label>表示名 <input name="display_name"></label>
+  <label><input type="checkbox" name="monitoring_enabled" checked> 監視</label>
+  <label><input type="checkbox" name="recording_enabled" checked> 録画</label>
+  <label><input type="checkbox" name="comments_enabled" checked> コメント収集</label>
+  <button type="submit">追加</button>
+</form>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>プラットフォーム</th><th>配信者</th><th>配信</th><th>録画</th><th>コメント</th>
+        <th>最終確認</th><th>最終配信</th><th>最終録画</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      {% include "streamer_row.html" %}
+      {% else %}
+      <tr><td colspan="9">配信者はまだいません。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

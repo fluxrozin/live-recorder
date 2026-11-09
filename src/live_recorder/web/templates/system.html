@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}システム{% endblock %}
+{% block content %}
+<h1>システム状態</h1>
+<section class="grid">
+  <article class="card"><span class="muted">Web</span><strong>稼働中</strong></article>
+  <article class="card"><span class="muted">ワーカー</span><strong>{{ "稼働中" if worker_ok else "停止または無応答" }}</strong><span class="muted">{% if worker_age is not none %}{{ worker_age }} 秒前{% endif %}</span></article>
+  <article class="card"><span class="muted">PostgreSQL</span><strong>{{ "接続できています" if db_ok else "失敗" }}</strong></article>
+  <article class="card"><span class="muted">最終監視</span><strong>{{ last_checked|localtime(tz) }}</strong></article>
+</section>
+<p>署名キー {{ "設定済み" if sign_key else "未設定" }} / ツイキャス認証 {{ "設定済み" if twitcasting else "未設定" }}</p>
+<h2>バージョン</h2>
+<ul>
+  <li>アプリ {{ versions.app }}</li>
+  <li>Streamlink {{ versions.streamlink or "未検出" }}</li>
+  <li>yt-dlp {{ versions.yt_dlp or "未検出" }}</li>
+  <li>TikTokLive {{ versions.tiktoklive or "未検出" }}</li>
+  <li>FFmpeg {{ versions.ffmpeg or "未検出" }}</li>
+  <li>ffprobe {{ versions.ffprobe or "未検出" }}</li>
+</ul>
+<h2>録画エンジン</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>名前</th><th>バージョン</th><th>使用可否</th><th>最終成功</th><th>最終失敗</th><th>理由</th><th>失敗回数</th></tr></thead>
+    <tbody>
+      {% for engine in engines %}
+      <tr>
+        <td>{{ engine.name }}</td>
+        <td>{{ engine.version }}</td>
+        <td>{{ "可" if engine.available else "不可" }}</td>
+        <td>{{ engine.last_success_at|localtime(tz) }}</td>
+        <td>{{ engine.last_failure_at|localtime(tz) }}</td>
+        <td>{{ engine.failure_reason }}</td>
+        <td>{{ engine.retry_count }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7">ワーカー起動後に記録されます。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<h2>直近のイベント</h2>
+<ul>
+  {% for event in events %}
+  <li>{{ event.created_at|localtime(tz) }} [{{ event.severity }}] {{ event.message }}</li>
+  {% else %}
+  <li class="muted">イベントはまだありません。</li>
+  {% endfor %}
+</ul>
+<h2>ファイル照合</h2>
+<form method="post" action="/system/scan">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">保存先を照合する</button>
+</form>
+{% if report %}
+  <h3>見つからないファイル</h3>
+  <ul>{% for item in report.missing %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
+  <h3>サイズ不一致</h3>
+  <ul>{% for item in report.size_mismatch %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
+  <h3>破損の可能性</h3>
+  <ul>{% for item in report.suspect %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
+  <h3>データベース未登録</h3>
+  <ul>{% for item in report.unregistered %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
+  <h3>未確定の一時ファイル</h3>
+  <ul>{% for item in report.temporary %}<li>{{ item }}</li>{% else %}<li class="muted">なし</li>{% endfor %}</ul>
+{% endif %}
+{% endblock %}

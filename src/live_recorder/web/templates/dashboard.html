@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}概況{% endblock %}
+{% block content %}
+<h1>概況</h1>
+<section class="grid">
+  <article class="card"><span class="muted">監視対象</span><strong>{{ stats.streamers }}</strong></article>
+  <article class="card"><span class="muted">配信中</span><strong>{{ stats.live }}</strong></article>
+  <article class="card"><span class="muted">録画中</span><strong>{{ stats.recording }}</strong></article>
+  <article class="card"><span class="muted">コメント収集中</span><strong>{{ stats.collecting }}</strong></article>
+  <article class="card"><span class="muted">本日の配信</span><strong>{{ stats.sessions_today }}</strong></article>
+  <article class="card"><span class="muted">本日のコメント</span><strong>{{ stats.comments_today }}</strong></article>
+  <article class="card"><span class="muted">録画の合計</span><strong>{{ stats.total_bytes|bytes }}</strong></article>
+  <article class="card"><span class="muted">空き容量</span><strong>{{ free|bytes }}</strong><span class="muted">/ {{ total|bytes }}</span></article>
+</section>
+<h2>直近の配信</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>配信者</th><th>プラットフォーム</th><th>タイトル</th><th>検知</th><th>録画</th></tr></thead>
+    <tbody>
+      {% for card in cards %}
+      <tr>
+        <td><a href="/recordings/{{ card.id }}">{{ card.name }}</a></td>
+        <td>{{ card.platform|platform_label }}</td>
+        <td>{{ card.title }}</td>
+        <td>{{ card.detected_at|localtime(tz) }}</td>
+        <td><span class="pill {{ card.status }}">{{ card.status|rec_label }}</span></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">まだ履歴がありません。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<h2>配信者別の容量</h2>
+<ul>
+  {% for platform, name, size in by_streamer %}
+  <li>{{ platform|platform_label }} / {{ name }}: {{ size|bytes }}</li>
+  {% else %}
+  <li class="muted">集計できるファイルはまだありません。</li>
+  {% endfor %}
+</ul>
+<h2>直近の警告とエラー</h2>
+<ul>
+  {% for event in errors %}
+  <li>{{ event.created_at|localtime(tz) }} [{{ event.severity }}] {{ event.message }}</li>
+  {% else %}
+  <li class="muted">直近の警告はありません。</li>
+  {% endfor %}
+</ul>
+{% endblock %}

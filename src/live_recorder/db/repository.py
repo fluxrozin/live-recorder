@@ -1,0 +1,602 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from live_recorder.comments.dedupe import dedupe_key
+from live_recorder.db.models import (
+    CollectionGap,
+    Comment,
+    CommentCollectionJob,
+    RecorderEngine,
+    RecordingJob,
+    RecordingSegment,
+    Streamer,
+    StreamSession,
+    SystemEvent,
+    User,
+    WorkerHeartbeat,
+)
+from live_recorder.domain.enums import (
+    COMMENT_ACTIVE,
+    RECORDING_ACTIVE,
+    CommentJobStatus,
+    RecordingStatus,
+    recording_terminal_path,
+    transition_comments,
+    transition_recording,
+)
+from live_recorder.timeutil import utcnow
+
+REC_ACTIVE = tuple(status.value for status in RECORDING_ACTIVE)
+COM_ACTIVE = tuple(status.value for status in COMMENT_ACTIVE)
+
+
+class RepositoryError(ValueError):
+    pass
+
+
+class Repository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def count_users(self) -> int:
+        return int(await self.session.scalar(select(func.count()).select_from(User)) or 0)
+
+    async def user_by_name(self, username: str) -> User | None:
+        return await self.session.scalar(select(User).where(User.username == username))
+
+    async def user_by_id(self, user_id: int) -> User | None:
+        return await self.session.get(User, user_id)
+
+    async def create_user(self, username: str, password_hash: str) -> User:
+        user = User(username=username, password_hash=password_hash, is_active=True)
+        self.session.add(user)
+        await self.session.flush()
+        return user
+
+    async def list_streamers(self) -> list[Streamer]:
+        result = await self.session.scalars(select(Streamer).order_by(Streamer.platform, Streamer.display_name))
+        return list(result)
+
+    async def monitored_streamers(self) -> list[Streamer]:
+        result = await self.session.scalars(
+            select(Streamer).where(Streamer.monitoring_enabled.is_(True)).order_by(Streamer.id)
+        )
+        return list(result)
+
+    async def get_streamer(self, streamer_id: int) -> Streamer | None:
+        return await self.session.get(Streamer, streamer_id)
+
+    async def find_streamer(self, platform: str, user_id: str) -> Streamer | None:
+        return await self.session.scalar(
+            select(Streamer).where(Streamer.platform == platform, Streamer.platform_user_id == user_id)
+        )
+
+    async def add_streamer(self, streamer: Streamer) -> Streamer:
+        self.session.add(streamer)
+        await self.session.flush()
+        return streamer
+
+    async def delete_streamer(self, streamer_id: int) -> None:
+        count = await self.session.scalar(
+            select(func.count()).select_from(StreamSession).where(StreamSession.streamer_id == streamer_id)
+        )
+        if count:
+            raise RepositoryError("録画履歴がある配信者は削除できません。先に履歴を削除してください")
+        streamer = await self.get_streamer(streamer_id)
+        if streamer is None:
+            raise RepositoryError("配信者が見つかりません")
+        await self.session.delete(streamer)
+
+    async def open_session(self, streamer_id: int) -> StreamSession | None:
+        return await self.session.scalar(
+            select(StreamSession)
+            .where(StreamSession.streamer_id == streamer_id, StreamSession.status.in_(("LIVE", "ENDING")))
+            .order_by(StreamSession.id.desc())
+        )
+
+    async def create_session(self, **kwargs: object) -> StreamSession:
+        session = StreamSession(**kwargs)  # type: ignore[arg-type]
+        self.session.add(session)
+        await self.session.flush()
+        return session
+
+    async def get_session(self, session_id: int) -> StreamSession | None:
+        return await self.session.scalar(
+            select(StreamSession)
+            .options(selectinload(StreamSession.streamer))
+            .where(StreamSession.id == session_id)
+        )
+
+    async def active_recording(self, session_id: int) -> RecordingJob | None:
+        return await self.session.scalar(
+            select(RecordingJob)
+            .where(RecordingJob.stream_session_id == session_id, RecordingJob.status.in_(REC_ACTIVE))
+            .order_by(RecordingJob.id.desc())
+        )
+
+    async def active_comments(self, session_id: int) -> CommentCollectionJob | None:
+        return await self.session.scalar(
+            select(CommentCollectionJob)
+            .where(
+                CommentCollectionJob.stream_session_id == session_id,
+                CommentCollectionJob.status.in_(COM_ACTIVE),
+            )
+            .order_by(CommentCollectionJob.id.desc())
+        )
+
+    async def count_active_recordings(self) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count()).select_from(RecordingJob).where(RecordingJob.status.in_(REC_ACTIVE))
+            )
+            or 0
+        )
+
+    async def create_recording_job(self, session_id: int) -> RecordingJob:
+        job = RecordingJob(stream_session_id=session_id, status=RecordingStatus.PENDING.value, retry_count=0)
+        self.session.add(job)
+        await self.session.flush()
+        return job
+
+    async def create_comment_job(self, session_id: int) -> CommentCollectionJob:
+        job = CommentCollectionJob(stream_session_id=session_id, status=CommentJobStatus.PENDING.value)
+        self.session.add(job)
+        await self.session.flush()
+        return job
+
+    async def get_recording_job(self, job_id: int) -> RecordingJob | None:
+        return await self.session.get(RecordingJob, job_id)
+
+    async def get_comment_job(self, job_id: int) -> CommentCollectionJob | None:
+        return await self.session.get(CommentCollectionJob, job_id)
+
+    def move_recording(self, job: RecordingJob, status: RecordingStatus) -> None:
+        job.status = transition_recording(RecordingStatus(job.status), status).value
+        job.updated_at = utcnow()
+
+    def move_comments(self, job: CommentCollectionJob, status: CommentJobStatus) -> None:
+        job.status = transition_comments(CommentJobStatus(job.status), status).value
+        job.updated_at = utcnow()
+
+    def finish_recording(self, job: RecordingJob, target: RecordingStatus, error: str | None = None) -> None:
+        for step in recording_terminal_path(RecordingStatus(job.status), target):
+            self.move_recording(job, step)
+        job.finished_at = utcnow()
+        if error:
+            job.last_error = error[:2000]
+
+    async def next_segment_number(self, job_id: int) -> int:
+        current = await self.session.scalar(
+            select(func.max(RecordingSegment.segment_number)).where(RecordingSegment.recording_job_id == job_id)
+        )
+        return int(current or 0) + 1
+
+    async def add_segment(self, job_id: int, number: int, relative: str, started: datetime) -> RecordingSegment:
+        segment = RecordingSegment(
+            recording_job_id=job_id,
+            segment_number=number,
+            started_at=started,
+            file_path=relative,
+            validation_status="pending",
+        )
+        self.session.add(segment)
+        await self.session.flush()
+        return segment
+
+    async def segments_for_job(self, job_id: int) -> list[RecordingSegment]:
+        result = await self.session.scalars(
+            select(RecordingSegment)
+            .where(RecordingSegment.recording_job_id == job_id)
+            .order_by(RecordingSegment.segment_number)
+        )
+        return list(result)
+
+    async def unfinished_segments(self) -> list[RecordingSegment]:
+        result = await self.session.scalars(
+            select(RecordingSegment).where(RecordingSegment.finished_at.is_(None), RecordingSegment.file_removed.is_(False))
+        )
+        return list(result)
+
+    async def unfinished_jobs(self) -> list[RecordingJob]:
+        result = await self.session.scalars(select(RecordingJob).where(RecordingJob.status.in_(REC_ACTIVE)))
+        return list(result)
+
+    async def unfinished_comment_jobs(self) -> list[CommentCollectionJob]:
+        result = await self.session.scalars(
+            select(CommentCollectionJob).where(CommentCollectionJob.status.in_(COM_ACTIVE))
+        )
+        return list(result)
+
+    async def add_gap(
+        self, session_id: int, job_type: str, started: datetime, ended: datetime | None, reason: str
+    ) -> None:
+        self.session.add(
+            CollectionGap(
+                stream_session_id=session_id,
+                job_type=job_type,
+                started_at=started,
+                ended_at=ended,
+                reason=reason[:200],
+            )
+        )
+
+    async def add_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        severity: str = "info",
+        session_id: int | None = None,
+        details: dict | None = None,
+    ) -> None:
+        self.session.add(
+            SystemEvent(
+                event_type=event_type,
+                severity=severity,
+                stream_session_id=session_id,
+                message=message[:2000],
+                details=details or {},
+            )
+        )
+
+    async def insert_comments(self, rows: list[dict[str, object]]) -> int:
+        if not rows:
+            return 0
+        stmt = (
+            pg_insert(Comment)
+            .values(rows)
+            .on_conflict_do_nothing(constraint="uq_comments_session_dedupe")
+            .returning(Comment.id)
+        )
+        result = await self.session.execute(stmt)
+        return len(result.scalars().all())
+
+    async def comment_rows(
+        self,
+        *,
+        session_id: int,
+        recording_started: datetime | None,
+        stream_started: datetime | None,
+        drafts: list[object],
+    ) -> list[dict[str, object]]:
+        from live_recorder.comments.offsets import offsets
+        from live_recorder.platforms.types import CommentDraft
+
+        rows: list[dict[str, object]] = []
+        for draft in drafts:
+            if not isinstance(draft, CommentDraft):
+                continue
+            stream_offset, recording_offset = offsets(
+                posted_at=draft.posted_at,
+                received_at=draft.received_at,
+                stream_started_at=stream_started,
+                recording_started_at=recording_started,
+            )
+            rows.append(
+                {
+                    "stream_session_id": session_id,
+                    "platform_comment_id": draft.platform_comment_id,
+                    "platform_user_id": draft.platform_user_id,
+                    "nickname": draft.nickname,
+                    "message": draft.message,
+                    "posted_at": draft.posted_at,
+                    "received_at": draft.received_at,
+                    "stream_offset_ms": stream_offset,
+                    "recording_offset_ms": recording_offset,
+                    "dedupe_key": dedupe_key(
+                        platform_comment_id=draft.platform_comment_id,
+                        platform_user_id=draft.platform_user_id,
+                        message=draft.message,
+                        posted_at=draft.posted_at,
+                        received_at=draft.received_at,
+                    ),
+                }
+            )
+        return rows
+
+    async def heartbeat(self, worker_id: str, status: str, detail: str | None) -> None:
+        existing = await self.session.get(WorkerHeartbeat, worker_id)
+        now = utcnow()
+        if existing is None:
+            self.session.add(WorkerHeartbeat(worker_id=worker_id, last_seen_at=now, status=status, detail=detail))
+        else:
+            existing.last_seen_at = now
+            existing.status = status
+            existing.detail = detail
+
+    async def latest_heartbeat(self) -> WorkerHeartbeat | None:
+        return await self.session.scalar(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc()))
+
+    async def list_engines(self) -> list[RecorderEngine]:
+        result = await self.session.scalars(select(RecorderEngine).order_by(RecorderEngine.name))
+        return list(result)
+
+    async def upsert_engine(self, name: str, *, version: str | None, available: bool) -> None:
+        row = await self.session.get(RecorderEngine, name)
+        now = utcnow()
+        if row is None:
+            self.session.add(RecorderEngine(name=name, version=version, available=available, updated_at=now))
+        else:
+            row.version = version
+            row.available = available
+            row.updated_at = now
+
+    async def mark_engine(self, name: str, *, ok: bool, reason: str | None = None) -> None:
+        row = await self.session.get(RecorderEngine, name)
+        now = utcnow()
+        if row is None:
+            row = RecorderEngine(name=name, available=True, updated_at=now)
+            self.session.add(row)
+        if ok:
+            row.last_success_at = now
+            row.failure_reason = None
+        else:
+            row.last_failure_at = now
+            row.failure_reason = (reason or "")[:2000]
+            row.retry_count = (row.retry_count or 0) + 1
+        row.updated_at = now
+
+    async def recent_errors(self, limit: int = 8) -> list[SystemEvent]:
+        result = await self.session.scalars(
+            select(SystemEvent)
+            .where(SystemEvent.severity.in_(("error", "warning")))
+            .order_by(SystemEvent.created_at.desc())
+            .limit(limit)
+        )
+        return list(result)
+
+    async def recent_events(self, limit: int = 40) -> list[SystemEvent]:
+        result = await self.session.scalars(select(SystemEvent).order_by(SystemEvent.created_at.desc()).limit(limit))
+        return list(result)
+
+    def session_query(self) -> Select[tuple[StreamSession]]:
+        return select(StreamSession).options(selectinload(StreamSession.streamer)).order_by(StreamSession.detected_at.desc())
+
+    async def search_sessions(
+        self,
+        *,
+        streamer_id: int | None,
+        platform: str | None,
+        status: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[StreamSession], int]:
+        stmt = self.session_query()
+        count_stmt = select(func.count()).select_from(StreamSession).join(Streamer)
+        if streamer_id:
+            stmt = stmt.where(StreamSession.streamer_id == streamer_id)
+            count_stmt = count_stmt.where(StreamSession.streamer_id == streamer_id)
+        if platform:
+            stmt = stmt.join(Streamer).where(Streamer.platform == platform)
+            count_stmt = count_stmt.where(Streamer.platform == platform)
+        if start:
+            stmt = stmt.where(StreamSession.detected_at >= start)
+            count_stmt = count_stmt.where(StreamSession.detected_at >= start)
+        if end:
+            stmt = stmt.where(StreamSession.detected_at <= end)
+            count_stmt = count_stmt.where(StreamSession.detected_at <= end)
+        if status:
+            job_ids = select(RecordingJob.stream_session_id).where(RecordingJob.status == status)
+            stmt = stmt.where(StreamSession.id.in_(job_ids))
+            count_stmt = count_stmt.where(StreamSession.id.in_(job_ids))
+        total = int(await self.session.scalar(count_stmt) or 0)
+        rows = list(
+            await self.session.scalars(stmt.offset(max(0, page - 1) * page_size).limit(page_size))
+        )
+        return rows, total
+
+    async def latest_recording(self, session_id: int) -> RecordingJob | None:
+        return await self.session.scalar(
+            select(RecordingJob).where(RecordingJob.stream_session_id == session_id).order_by(RecordingJob.id.desc())
+        )
+
+    async def latest_comment_job(self, session_id: int) -> CommentCollectionJob | None:
+        return await self.session.scalar(
+            select(CommentCollectionJob)
+            .where(CommentCollectionJob.stream_session_id == session_id)
+            .order_by(CommentCollectionJob.id.desc())
+        )
+
+    async def jobs_for_session(self, session_id: int) -> list[RecordingJob]:
+        result = await self.session.scalars(
+            select(RecordingJob).where(RecordingJob.stream_session_id == session_id).order_by(RecordingJob.id)
+        )
+        return list(result)
+
+    async def segments_for_session(self, session_id: int) -> list[RecordingSegment]:
+        result = await self.session.scalars(
+            select(RecordingSegment)
+            .join(RecordingJob)
+            .where(RecordingJob.stream_session_id == session_id)
+            .order_by(RecordingSegment.started_at)
+        )
+        return list(result)
+
+    async def get_segment(self, segment_id: int) -> RecordingSegment | None:
+        return await self.session.get(RecordingSegment, segment_id)
+
+    async def comment_count(self, session_id: int) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count()).select_from(Comment).where(Comment.stream_session_id == session_id)
+            )
+            or 0
+        )
+
+    async def gaps_for_session(self, session_id: int) -> list[CollectionGap]:
+        result = await self.session.scalars(
+            select(CollectionGap).where(CollectionGap.stream_session_id == session_id).order_by(CollectionGap.started_at)
+        )
+        return list(result)
+
+    async def search_comments(
+        self,
+        *,
+        text: str | None,
+        user_id: str | None,
+        nickname: str | None,
+        streamer_id: int | None,
+        platform: str | None,
+        session_id: int | None,
+        start: datetime | None,
+        end: datetime | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[Comment], int]:
+        stmt = select(Comment).join(StreamSession).join(Streamer)
+        filters = []
+        if text:
+            filters.append(Comment.message.ilike(self._like(text)))
+        if user_id:
+            filters.append(Comment.platform_user_id == user_id)
+        if nickname:
+            filters.append(Comment.nickname.ilike(self._like(nickname)))
+        if streamer_id:
+            filters.append(StreamSession.streamer_id == streamer_id)
+        if platform:
+            filters.append(Streamer.platform == platform)
+        if session_id:
+            filters.append(Comment.stream_session_id == session_id)
+        if start:
+            filters.append(Comment.received_at >= start)
+        if end:
+            filters.append(Comment.received_at <= end)
+        if filters:
+            stmt = stmt.where(*filters)
+        count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+        total = int(await self.session.scalar(count_stmt) or 0)
+        stmt = stmt.options(selectinload(Comment.session).selectinload(StreamSession.streamer))
+        rows = list(
+            await self.session.scalars(
+                stmt.order_by(Comment.received_at.asc()).offset(max(0, page - 1) * page_size).limit(page_size)
+            )
+        )
+        return rows, total
+
+    async def export_comments(self, **filters: object) -> list[Comment]:
+        page = 1
+        found: list[Comment] = []
+        while True:
+            rows, total = await self.search_comments(page=page, page_size=500, **filters)  # type: ignore[arg-type]
+            found.extend(rows)
+            if len(found) >= total or not rows:
+                break
+            page += 1
+            if page > 200:
+                break
+        return found
+
+    async def delete_session(self, session_id: int) -> StreamSession | None:
+        row = await self.session.get(StreamSession, session_id)
+        if row is None:
+            return None
+        await self.session.delete(row)
+        return row
+
+    async def stored_files(self) -> list[RecordingSegment]:
+        result = await self.session.scalars(select(RecordingSegment).where(RecordingSegment.file_removed.is_(False)))
+        return list(result)
+
+    async def expired_segments(self, older_than: datetime) -> list[RecordingSegment]:
+        result = await self.session.scalars(
+            select(RecordingSegment).where(
+                RecordingSegment.file_removed.is_(False),
+                RecordingSegment.finished_at.is_not(None),
+                RecordingSegment.finished_at < older_than,
+            )
+        )
+        return list(result)
+
+    async def delete_comments_before(self, older_than: datetime) -> int:
+        result = await self.session.execute(delete(Comment).where(Comment.created_at < older_than))
+        return int(result.rowcount or 0)
+
+    async def dashboard(self, day_start: datetime) -> dict[str, int]:
+        streamers = int(await self.session.scalar(select(func.count()).select_from(Streamer)) or 0)
+        live = int(
+            await self.session.scalar(
+                select(func.count()).select_from(Streamer).where(Streamer.live_status == "LIVE", Streamer.monitoring_enabled.is_(True))
+            )
+            or 0
+        )
+        recording = await self.count_active_recordings()
+        collecting = int(
+            await self.session.scalar(
+                select(func.count()).select_from(CommentCollectionJob).where(CommentCollectionJob.status.in_(COM_ACTIVE))
+            )
+            or 0
+        )
+        sessions_today = int(
+            await self.session.scalar(
+                select(func.count()).select_from(StreamSession).where(StreamSession.detected_at >= day_start)
+            )
+            or 0
+        )
+        comments_today = int(
+            await self.session.scalar(select(func.count()).select_from(Comment).where(Comment.received_at >= day_start))
+            or 0
+        )
+        total_bytes = int(
+            await self.session.scalar(
+                select(func.coalesce(func.sum(RecordingSegment.file_size), 0)).where(RecordingSegment.file_removed.is_(False))
+            )
+            or 0
+        )
+        return {
+            "streamers": streamers,
+            "live": live,
+            "recording": recording,
+            "collecting": collecting,
+            "sessions_today": sessions_today,
+            "comments_today": comments_today,
+            "total_bytes": total_bytes,
+        }
+
+    async def recent_sessions(self, limit: int = 8) -> list[StreamSession]:
+        result = await self.session.scalars(self.session_query().limit(limit))
+        return list(result)
+
+    async def bytes_by_streamer(self) -> list[tuple[str, str, int]]:
+        stmt = (
+            select(Streamer.platform, Streamer.display_name, func.coalesce(func.sum(RecordingSegment.file_size), 0))
+            .join(StreamSession, StreamSession.streamer_id == Streamer.id)
+            .join(RecordingJob, RecordingJob.stream_session_id == StreamSession.id)
+            .join(RecordingSegment, RecordingSegment.recording_job_id == RecordingJob.id)
+            .where(RecordingSegment.file_removed.is_(False))
+            .group_by(Streamer.id)
+            .order_by(func.sum(RecordingSegment.file_size).desc())
+        )
+        rows = await self.session.execute(stmt)
+        return [(platform, name, int(size)) for platform, name, size in rows]
+
+    @staticmethod
+    def _like(value: str) -> str:
+        escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"
+
+    async def recording_started_at(self, session_id: int) -> datetime | None:
+        return await self.session.scalar(
+            select(func.min(RecordingJob.started_at)).where(RecordingJob.stream_session_id == session_id)
+        )
+
+    async def any_valid_segment(self, job_id: int) -> bool:
+        count = await self.session.scalar(
+            select(func.count())
+            .select_from(RecordingSegment)
+            .where(
+                RecordingSegment.recording_job_id == job_id,
+                RecordingSegment.file_removed.is_(False),
+                RecordingSegment.file_size.is_not(None),
+                RecordingSegment.file_size > 0,
+                or_(RecordingSegment.validation_status == "ok", RecordingSegment.validation_status == "partial"),
+            )
+        )
+        return bool(count)

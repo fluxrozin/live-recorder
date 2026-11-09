@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}配信の詳細{% endblock %}
+{% block content %}
+<h1>{{ detail.name }}</h1>
+<p>{{ detail.platform|platform_label }} / {{ detail.user_id }} / 配信ID {{ detail.stream_id }}</p>
+<p>{{ detail.title }}</p>
+<p>配信状態 <span class="pill {{ detail.status }}">{{ detail.status|session_label }}</span>
+   録画 <span class="pill {{ detail.recording_status }}">{{ detail.recording_status|rec_label }}</span>
+   コメント <span class="pill {{ detail.comment_status }}">{{ detail.comment_status|com_label }}</span></p>
+<p class="muted">検知 {{ detail.detected_at|localtime(tz) }} / プラットフォーム開始 {{ detail.platform_started_at|localtime(tz) }} / 終了検知 {{ detail.ended_detected_at|localtime(tz) }}</p>
+<p>録画エンジン: {{ detail.engine }}</p>
+{% if detail.recording_error %}<p class="error">{{ detail.recording_error }}</p>{% endif %}
+<p>コメント受信 {{ detail.comment_received }} / 保存 {{ detail.comment_stored }} / 失敗 {{ detail.comment_errors }}</p>
+<p class="actions">
+  <a class="button" href="/comments/export?session_id={{ detail.id }}&format=jsonl">JSONL</a>
+  <a class="button" href="/comments/export?session_id={{ detail.id }}&format=csv">CSV</a>
+  <a class="button" href="/comments/export?session_id={{ detail.id }}&format=txt">TXT</a>
+  <a class="button secondary" href="/comments?session_id={{ detail.id }}">コメントを見る</a>
+</p>
+<h2>ファイル</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>#</th><th>開始</th><th>終了</th><th>時間</th><th>サイズ</th><th>形式</th><th>検証</th><th></th></tr></thead>
+    <tbody>
+      {% for segment in detail.segments %}
+      <tr>
+        <td>{{ segment.number }}</td>
+        <td>{{ segment.started_at|localtime(tz) }}</td>
+        <td>{{ segment.finished_at|localtime(tz) }}</td>
+        <td>{{ segment.duration_ms|offset }}</td>
+        <td>{{ segment.size|bytes }}</td>
+        <td>{{ segment.container }}</td>
+        <td>{{ segment.validation }}</td>
+        <td>
+          {% if not segment.removed %}
+          <a href="/recordings/segments/{{ segment.id }}/download">{{ segment.name }} をダウンロード</a>
+          {% else %}削除済み{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8">ファイルはありません。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<h2>欠損</h2>
+<ul>
+  {% for gap in detail.gaps %}
+  <li>{{ gap.job_type }} {{ gap.started_at|localtime(tz) }} 〜 {{ gap.ended_at|localtime(tz) }} {{ gap.reason }}</li>
+  {% else %}
+  <li class="muted">記録された欠損はありません。</li>
+  {% endfor %}
+</ul>
+<form method="post" action="/recordings/{{ detail.id }}/delete-files">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label><input type="checkbox" name="confirm" value="yes"> ファイルだけ削除する</label>
+  <button class="danger" type="submit">ファイルを削除</button>
+</form>
+<form method="post" action="/recordings/{{ detail.id }}/delete">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label><input type="checkbox" name="confirm" value="yes"> 履歴を削除する</label>
+  <label><input type="checkbox" name="delete_files" value="yes"> ファイルも一緒に削除する</label>
+  <button class="danger" type="submit">履歴を削除</button>
+</form>
+{% endblock %}

@@ -1,0 +1,122 @@
+name: live-recorder
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recorder}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-live_recorder}
+      TZ: ${TZ:-Asia/Tokyo}
+    volumes:
+      - ${DATABASE_DIR:?set DATABASE_DIR}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recorder} -d ${POSTGRES_DB:-live_recorder}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  app:
+    build: .
+    image: live-recorder:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment: &app_env
+      APP_HOME: /app
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-recorder}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-live_recorder}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      RECORDINGS_DIR: /data/recordings
+      CONFIG_DIR: /data/config
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Asia/Tokyo}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TZ: ${TZ:-Asia/Tokyo}
+      TWITCASTING_CLIENT_ID: ${TWITCASTING_CLIENT_ID:-}
+      TWITCASTING_CLIENT_SECRET: ${TWITCASTING_CLIENT_SECRET:-}
+      TWITCASTING_ACCESS_TOKEN: ${TWITCASTING_ACCESS_TOKEN:-}
+      SIGN_API_KEY: ${SIGN_API_KEY:-}
+      WEB_PORT: 8080
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:8080"
+    volumes:
+      - ${RECORDINGS_DIR:?set RECORDINGS_DIR}:/data/recordings
+      - ${CONFIG_DIR:?set CONFIG_DIR}:/data/config
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  worker:
+    image: live-recorder:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "live_recorder.worker"]
+    environment:
+      <<: *app_env
+    volumes:
+      - ${RECORDINGS_DIR:?set RECORDINGS_DIR}:/data/recordings
+      - ${CONFIG_DIR:?set CONFIG_DIR}:/data/config
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import time; from pathlib import Path; p=Path('/tmp/live-recorder-worker-heartbeat'); assert p.exists() and time.time()-p.stat().st_mtime<60",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  internal:
+    driver: bridge

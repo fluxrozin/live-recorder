@@ -1,0 +1,53 @@
+[project]
+name = "live-recorder"
+version = "0.1.0"
+description = "Synology NAS 向け TikTok LIVE / ツイキャス自動録画・コメント記録"
+readme = "README.md"
+authors = [
+    { name = "fluxrozin", email = "fluxrozin@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "sqlalchemy[asyncio]>=2.0.36,<3",
+    "alembic>=1.14,<2",
+    "asyncpg>=0.30,<1",
+    "psycopg[binary]>=3.2,<4",
+    "jinja2>=3.1,<4",
+    "python-multipart>=0.0.18",
+    "itsdangerous>=2.2,<3",
+    "pwdlib[argon2]>=0.2,<1",
+    "httpx>=0.28,<1",
+    "TikTokLive==7.0.1",
+    "streamlink==8.6.3",
+    "yt-dlp==2026.10.26",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<1",
+    "ruff>=0.8,<1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

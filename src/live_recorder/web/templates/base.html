@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>{% block title %}録画管理{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf }}"}'>
+  <header>
+    <strong>ライブ配信録画</strong>
+    {% if username %}
+    <nav>
+      <a href="/">概況</a>
+      <a href="/streamers">配信者</a>
+      <a href="/recordings">録画履歴</a>
+      <a href="/comments">コメント</a>
+      <a href="/settings">設定</a>
+      <a href="/system">システム</a>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secondary">ログアウト</button>
+      </form>
+    </nav>
+    {% endif %}
+  </header>
+  <main>
+    {% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      document.body.addEventListener("htmx:configRequest", function (event) {
+        var token = document.querySelector('meta[name="csrf-token"]');
+        if (token) event.detail.headers["X-CSRF-Token"] = token.content;
+      });
+    });
+  </script>
+</body>
+</html>

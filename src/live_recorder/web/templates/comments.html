@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}コメント{% endblock %}
+{% block content %}
+<h1>コメント</h1>
+<form class="panel" method="get">
+  <label>本文 <input name="q" value="{{ filters.q }}"></label>
+  <label>投稿者ID <input name="user_id" value="{{ filters.user_id }}"></label>
+  <label>表示名 <input name="nickname" value="{{ filters.nickname }}"></label>
+  <label>配信者
+    <select name="streamer_id">
+      <option value="">すべて</option>
+      {% for person in streamers %}
+      <option value="{{ person.id }}" {% if filters.streamer_id == person.id|string %}selected{% endif %}>{{ person.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>プラットフォーム
+    <select name="platform">
+      <option value="">すべて</option>
+      <option value="tiktok" {% if filters.platform == "tiktok" %}selected{% endif %}>TikTok</option>
+      <option value="twitcasting" {% if filters.platform == "twitcasting" %}selected{% endif %}>ツイキャス</option>
+    </select>
+  </label>
+  <label>配信セッションID <input name="session_id" value="{{ filters.session_id }}"></label>
+  <label>開始 <input type="date" name="start" value="{{ filters.start }}"></label>
+  <label>終了 <input type="date" name="end" value="{{ filters.end }}"></label>
+  <button type="submit">検索</button>
+</form>
+<p class="actions">
+  <a class="button" href="/comments/export?format=jsonl&{{ query }}">JSONL</a>
+  <a class="button" href="/comments/export?format=csv&{{ query }}">CSV</a>
+  <a class="button" href="/comments/export?format=txt&{{ query }}">TXT</a>
+</p>
+<p class="muted">{{ total }} 件。ページ {{ page }} / {{ pages }}。時刻は受信または投稿時刻です。</p>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>時刻</th><th>配信者</th><th>投稿者ID</th><th>表示名</th><th>本文</th><th>録画開始から</th></tr></thead>
+    <tbody>
+      {% for comment in comments %}
+      <tr>
+        <td>{{ comment.when|localtime(tz) }}</td>
+        <td><a href="/recordings/{{ comment.session_id }}">{{ comment.streamer }}</a></td>
+        <td>{{ comment.user_id }}</td>
+        <td>{{ comment.nickname }}</td>
+        <td>{{ comment.message }}</td>
+        <td>{{ comment.offset|offset }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">コメントはありません。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p>
+  {% if page > 1 %}<a href="?page={{ page - 1 }}&{{ query }}">前へ</a>{% endif %}
+  {% if page < pages %}<a href="?page={{ page + 1 }}&{{ query }}">次へ</a>{% endif %}
+</p>
+{% endblock %}

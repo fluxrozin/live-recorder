@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}配信者の編集{% endblock %}
+{% block content %}
+<h1>配信者の編集</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form class="card" method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p>{{ row.platform|platform_label }} / {{ row.user_id }}</p>
+  <p class="muted">{{ row.profile_url }}</p>
+  <label>表示名 <input name="display_name" value="{{ row.display_name }}" required></label>
+  <label><input type="checkbox" name="monitoring_enabled" {% if row.monitoring_enabled %}checked{% endif %}> 監視</label>
+  <label><input type="checkbox" name="recording_enabled" {% if row.recording_enabled %}checked{% endif %}> 録画</label>
+  <label><input type="checkbox" name="comments_enabled" {% if row.comments_enabled %}checked{% endif %}> コメント収集</label>
+  <button type="submit">保存</button>
+</form>
+<form method="post" action="/streamers/{{ row.id }}/delete">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label><input type="checkbox" name="confirm" value="yes"> 履歴がない場合に削除する</label>
+  <button type="submit" class="danger">配信者を削除</button>
+</form>
+{% endblock %}

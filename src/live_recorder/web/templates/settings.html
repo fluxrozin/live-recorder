@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}設定{% endblock %}
+{% block content %}
+<h1>設定</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<p class="muted">この画面の項目は保存後、ワーカーの次の監視周期で反映されます。保存先、ポート、APIキーは環境変数のため、変更にはコンテナの再起動が必要です。</p>
+<form class="card" method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>監視間隔（秒、30以上） <input name="monitor_interval_seconds" type="number" min="30" value="{{ runtime.monitor_interval_seconds }}"></label>
+  <label>同時録画上限 <input name="max_concurrent_recordings" type="number" min="1" max="20" value="{{ runtime.max_concurrent_recordings }}"></label>
+  <label>録画品質
+    <select name="recording_quality">
+      {% for quality in ["best", "high", "medium"] %}
+      <option value="{{ quality }}" {% if runtime.recording_quality == quality %}selected{% endif %}>{{ quality }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>最低空き容量（GiB） <input name="min_free_gib" type="number" min="0" step="1" value="{{ (runtime.min_free_bytes / 1073741824)|round(0, 'floor')|int }}"></label>
+  <label>録画の保存期限（日、0は無期限） <input name="retention_days" type="number" min="0" value="{{ runtime.retention_days }}"></label>
+  <label><input type="checkbox" name="auto_delete_enabled" {% if runtime.auto_delete_enabled %}checked{% endif %}> 期限を過ぎた録画ファイルを自動削除する</label>
+  <fieldset>
+    <legend>TikTok 録画エンジンの順序</legend>
+    {% for index in [1, 2, 3] %}
+    <label>{{ index }}
+      <select name="engine_{{ index }}">
+        <option value="">使わない</option>
+        {% for engine in ["streamlink", "yt-dlp", "tiktoklive"] %}
+        <option value="{{ engine }}" {% if runtime.tiktok_engine_order|length >= index and runtime.tiktok_engine_order[index - 1] == engine %}selected{% endif %}>{{ engine }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% endfor %}
+  </fieldset>
+  <label><input type="checkbox" name="comments_globally_enabled" {% if runtime.comments_globally_enabled %}checked{% endif %}> コメント収集を全体で有効にする</label>
+  <label>ログレベル
+    <select name="log_level">
+      {% for level in ["DEBUG", "INFO", "WARNING", "ERROR"] %}
+      <option {% if runtime.log_level == level %}selected{% endif %}>{{ level }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>表示タイムゾーン <input name="display_timezone" value="{{ runtime.display_timezone }}"></label>
+  <label>コメント保存期限（日、0は無期限） <input name="comment_retention_days" type="number" min="0" value="{{ runtime.comment_retention_days }}"></label>
+  <label><input type="checkbox" name="auto_export_on_complete" {% if runtime.auto_export_on_complete %}checked{% endif %}> 収集完了時に JSONL を自動書き出しする</label>
+  <label>再接続回数 <input name="reconnect_max_attempts" type="number" min="0" max="30" value="{{ runtime.reconnect_max_attempts }}"></label>
+  <label>ツイキャスコメント間隔（秒） <input name="comment_poll_seconds" type="number" min="5" max="120" value="{{ runtime.comment_poll_seconds }}"></label>
+  <button type="submit">保存</button>
+</form>
+<section class="panel">
+  <h2>再起動が必要な値</h2>
+  <p>保存先: {{ env.recordings_dir }}</p>
+  <p>Webポート: {{ env.web_port }}</p>
+  <p>ツイキャス認証: {{ "設定済み" if env.twitcasting else "未設定" }}</p>
+  <p>TikTok署名キー: {{ "設定済み" if env.sign_key else "未設定" }}</p>
+  <p>Cookie Secure: {{ "有効" if env.cookie_secure else "無効" }}</p>
+</section>
+{% endblock %}

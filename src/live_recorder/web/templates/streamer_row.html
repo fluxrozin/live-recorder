@@ -1,0 +1,29 @@
+<tr id="streamer-{{ row.id }}">
+  <td>{{ row.platform|platform_label }}</td>
+  <td>{{ row.display_name }}<div class="muted">{{ row.user_id }}</div></td>
+  <td><span class="pill {{ row.live_status }}">{{ row.live_status|live_label }}</span></td>
+  <td><span class="pill {{ row.recording_state }}">{{ row.recording_state|rec_label }}</span></td>
+  <td><span class="pill {{ row.comment_state }}">{{ row.comment_state|com_label }}</span></td>
+  <td>{{ row.last_checked_at|localtime(tz) }}</td>
+  <td>{{ row.last_live_at|localtime(tz) }}</td>
+  <td>{{ row.last_recording_at|localtime(tz) }}</td>
+  <td class="actions">
+    <form method="post" action="/streamers/{{ row.id }}/toggle" hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="field" value="monitoring_enabled">
+      <button type="submit" class="secondary">監視{{ "停止" if row.monitoring_enabled else "開始" }}</button>
+    </form>
+    <form method="post" action="/streamers/{{ row.id }}/toggle" hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="field" value="recording_enabled">
+      <button type="submit" class="secondary">録画{{ "停止" if row.recording_enabled else "開始" }}</button>
+    </form>
+    <form method="post" action="/streamers/{{ row.id }}/toggle" hx-post="/streamers/{{ row.id }}/toggle" hx-target="closest tr" hx-swap="outerHTML">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="field" value="comments_enabled">
+      <button type="submit" class="secondary">コメント{{ "停止" if row.comments_enabled else "開始" }}</button>
+    </form>
+    <a class="button secondary" href="/streamers/{{ row.id }}/edit">編集</a>
+    <a class="button secondary" href="/recordings?streamer_id={{ row.id }}">履歴</a>
+  </td>
+</tr>

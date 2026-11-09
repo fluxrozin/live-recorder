@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}ログイン{% endblock %}
+{% block content %}
+<section class="card login">
+  <h1>管理者ログイン</h1>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>ユーザー名 <input name="username" autocomplete="username" required></label>
+    <label>パスワード <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">ログイン</button>
+  </form>
+  <p class="muted">初回の管理者はサーバ上で <code>python -m live_recorder.cli create-admin</code> を実行して作成します。</p>
+</section>
+{% endblock %}
