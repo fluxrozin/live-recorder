@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% set active_nav = "speech" %}
+{% block title %}字幕本文{% endblock %}
+{% block content %}
+{{ ui.page_header("字幕本文", "文字起こしした発話を、コメントと同じように時刻順で読めます。") }}
+
+{%- set chips = [] -%}
+{%- if filters.q %}{% set _ = chips.append(("本文", filters.q, "q")) %}{% endif -%}
+{%- if filters.session_id %}{% set _ = chips.append(("録画", "#" ~ filters.session_id, "session_id")) %}{% endif -%}
+{%- if filters.segment_id %}{% set _ = chips.append(("ファイル", filters.file_name or "#" ~ filters.segment_id, "segment_id")) %}{% endif %}
+
+<section class="c-card">
+  <form method="get" action="/speech/cues" role="search" aria-label="字幕本文の検索"
+        hx-get="/speech/cues" hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#results">
+    <div class="c-filter-bar">
+      <div class="c-search c-search--lg">
+        {{ ui.icon("search") }}
+        <label class="u-sr-only" for="q">字幕本文を検索</label>
+        <input class="c-input" id="q" type="search" name="q" value="{{ filters.q }}" placeholder="字幕本文を検索" autocomplete="off">
+      </div>
+      {% if filters.session_id %}
+      <input type="hidden" name="session_id" value="{{ filters.session_id }}">
+      {% endif %}
+      {% if files|length > 1 %}
+      <div class="c-field">
+        <label class="c-label" for="f-speech-file">ファイル</label>
+        <select class="c-select" id="f-speech-file" name="segment_id">
+          <option value="">すべてのファイル</option>
+          {% for file in files %}
+          <option value="{{ file.id }}"{% if filters.segment_id == file.id|string %} selected{% endif %}>{{ file.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% elif filters.segment_id %}
+      <input type="hidden" name="segment_id" value="{{ filters.segment_id }}">
+      {% endif %}
+      <input type="hidden" name="order" value="{{ order }}">
+      <div class="c-filter-bar__actions">
+        <button type="submit" class="c-btn c-btn--primary">検索</button>
+      </div>
+    </div>
+  </form>
+</section>
+
+<div {{ ui.live_poll("speech-cues-poll", "results", url_with(request)) }}>
+<section class="c-card c-loading-region" id="results" aria-labelledby="results-title">
+  <div class="c-toolbar">
+    <h2 class="c-toolbar__summary" id="results-title" tabindex="-1" data-results-heading>
+      <span><strong>{{ "{:,}".format(total) }}</strong> 件{% if chips %}<span class="u-subtle">（検索結果）</span>{% endif %}</span>
+      {{ ui.time_order(order) }}
+      {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
+    </h2>
+    {{ ui.poll_status(rendered_at, tz) }}
+    <span class="u-spacer"></span>
+    {% if download_url %}
+    <a class="c-btn" href="{{ download_url }}" download>{{ ui.icon("download") }}SRT をダウンロード</a>
+    {% endif %}
+    <a class="c-btn" href="/speech{% if filters.session_id %}?session_id={{ filters.session_id }}{% endif %}">{{ ui.icon("loader-circle") }}処理状況</a>
+  </div>
+  {% if chips %}<div class="c-toolbar">{{ ui.filter_chips(chips, "/speech/cues") }}</div>{% endif %}
+
+  {% if lines %}
+  <div class="c-list-head" aria-hidden="true"><span>開始</span><span>終了</span><span>字幕</span><span>配信 / ファイル</span></div>
+  <ol class="c-comment-list">
+    {% for line in lines %}
+    <li class="c-comment">
+      <span class="c-comment__time">{{ line.start_ms|offset }}</span>
+      <div class="c-comment__author">
+        <span class="c-comment__nick">{{ line.end_ms|offset }}</span>
+      </div>
+      <p class="c-comment__body">{{ line.text }}</p>
+      <div class="c-comment__context">
+        <a class="u-truncate" href="/recordings/{{ line.session_id }}" title="{{ line.name }} の録画 #{{ line.session_id }}">{% if line.platform %}{{ ui.platform(line.platform, icon_only=True) }}{% endif %}{{ line.name }}</a>
+        <span class="c-comment__offset">{{ line.file_name }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+  {{ ui.pagination(page, pages, total, 50, hx=True) }}
+  {% elif chips %}
+  {% call ui.empty("search", "条件に一致する字幕はありません", "キーワードを短くするか、ファイルの条件を外してください。") %}
+    <a class="c-btn" href="/speech/cues{% if filters.session_id %}?session_id={{ filters.session_id }}{% endif %}">{{ ui.icon("rotate-ccw", "sm") }}条件をリセット</a>
+  {% endcall %}
+  {% else %}
+  {{ ui.empty("file-text", "字幕はまだありません", "録画が確定して文字起こしが終わると、発話がここに並びます。") }}
+  {% endif %}
+</section>
+</div>
+{% endblock %}

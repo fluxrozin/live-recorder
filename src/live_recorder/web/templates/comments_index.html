@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% set active_nav = "comments" %}
+{% block title %}コメント{% endblock %}
+{% block content %}
+{{ ui.page_header("コメント", "録画を選ぶと、その配信のコメントを読めます。") }}
+
+{%- set chips = [] -%}
+{%- if filters.streamer_id -%}
+  {%- set person = streamers|selectattr("id", "equalto", filters.streamer_id|int)|first -%}
+  {%- set _ = chips.append(("配信者", person.name if person else "#" ~ filters.streamer_id, "streamer_id")) -%}
+{%- endif -%}
+{%- if filters.platform %}{% set _ = chips.append(("プラットフォーム", filters.platform|platform_label, "platform")) %}{% endif %}
+
+<section class="c-card" aria-labelledby="comment-recordings-title">
+  <form method="get" action="/comments" role="search" aria-label="コメントのある録画">
+    <div class="c-filter-bar">
+      <div class="c-field">
+        <label class="c-label" for="f-comment-streamer">配信者</label>
+        <select class="c-select" id="f-comment-streamer" name="streamer_id">
+          <option value="">すべて</option>
+          {% for person in streamers %}
+          <option value="{{ person.id }}"{% if filters.streamer_id == person.id|string %} selected{% endif %}>{{ person.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="c-field">
+        <label class="c-label" for="f-comment-platform">プラットフォーム</label>
+        <select class="c-select" id="f-comment-platform" name="platform">
+          <option value="">すべて</option>
+          <option value="tiktok"{% if filters.platform == "tiktok" %} selected{% endif %}>TikTok</option>
+          <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>{{ "twitcasting"|platform_label }}</option>
+        </select>
+      </div>
+      <div class="c-filter-bar__actions">
+        <button type="submit" class="c-btn c-btn--primary">{{ ui.icon("search", "sm") }}絞り込む</button>
+      </div>
+    </div>
+  </form>
+
+  <div {{ ui.live_poll("comments-index-poll", "comments-index", url_with(request)) }}>
+  <div id="comments-index" class="c-live">
+  <div class="c-toolbar">
+    <h2 class="c-toolbar__summary" id="comment-recordings-title">
+      <span><strong>{{ "{:,}".format(total) }}</strong> 件</span>
+      {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
+    </h2>
+    {{ ui.filter_chips(chips, "/comments") }}
+    <span class="u-spacer"></span>
+    {{ ui.poll_status(rendered_at, tz) }}
+  </div>
+
+  {% if cards %}
+  <div class="c-table-wrap">
+    <table class="c-table c-table--stack">
+      <thead>
+        <tr>
+          <th scope="col">配信</th>
+          <th scope="col">日時</th>
+          <th scope="col" class="is-num">コメント</th>
+          <th scope="col" class="is-actions"><span class="u-sr-only">操作</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for card in cards %}
+        <tr>
+          <td class="is-fill">
+            <div class="c-table__cell-stack">
+              <span class="u-row">
+                <a class="c-table__link u-truncate" href="/comments?session_id={{ card.id }}">{{ card.name }}</a>
+                {{ ui.platform(card.platform) }}
+              </span>
+              <span class="c-table__secondary u-truncate" title="{{ card.title }}">{{ card.title }}</span>
+            </div>
+          </td>
+          <td data-label="日時" class="u-nowrap">{{ ui.time(card.started, tz) }}</td>
+          <td class="is-num" data-label="コメント">{{ "{:,}".format(card.comments) }}</td>
+          <td class="is-actions is-span">
+            <a class="c-btn c-btn--sm" href="/comments?session_id={{ card.id }}">{{ ui.icon("message-square-text", "sm") }}コメントを見る</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.pagination(page, pages, total, 20) }}
+  {% elif chips %}
+  {% call ui.empty("search", "条件に一致する録画はありません", "条件を変更するか、リセットしてコメントのある録画を表示してください。") %}
+    <a class="c-btn" href="/comments">{{ ui.icon("rotate-ccw", "sm") }}条件をリセット</a>
+  {% endcall %}
+  {% else %}
+  {{ ui.empty("message-square-text", "コメントのある録画はまだありません", "コメント収集が有効な配信者の配信中に、コメントが記録されます。") }}
+  {% endif %}
+  </div>
+  </div>
+</section>
+{% endblock %}

@@ -37,6 +37,15 @@ COMMENT_STATUS_JA = {
     "NONE": "なし",
 }
 
+SPEECH_STATUS_JA = {
+    "pending": "待機",
+    "running": "処理中",
+    "completed": "完了",
+    "failed": "失敗",
+    "skipped": "対象外",
+    "NONE": "—",
+}
+
 PLATFORM_JA = {
     "tiktok": "TikTok",
     "twitcasting": "Twitcasting",

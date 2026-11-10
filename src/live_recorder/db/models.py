@@ -46,6 +46,7 @@ class Streamer(Base):
     monitoring_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     recording_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     comments_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    speech_words: Mapped[str | None] = mapped_column(Text)
     live_status: Mapped[str] = mapped_column(String(16), default="OFFLINE", server_default="OFFLINE")
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_live_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -118,6 +119,7 @@ class RecordingJob(Base):
 
 class RecordingSegment(Base):
     __tablename__ = "recording_segments"
+    __table_args__ = (Index("ix_recording_segments_speech_status", "speech_status"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     recording_job_id: Mapped[int] = mapped_column(
@@ -132,6 +134,9 @@ class RecordingSegment(Base):
     container_format: Mapped[str | None] = mapped_column(String(32))
     validation_status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
     file_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    speech_status: Mapped[str | None] = mapped_column(String(16))
+    speech_srt_path: Mapped[str | None] = mapped_column(String(500))
+    speech_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     job: Mapped[RecordingJob] = relationship(back_populates="segments")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, fields
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -13,6 +14,8 @@ from live_recorder.timeutil import utcnow
 ENGINE_NAMES = ("streamlink", "yt-dlp", "tiktoklive")
 QUALITIES = ("best", "high", "medium")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+SPEECH_MODELS = ("large-v3", "large-v3-turbo")
+_SPEECH_LANGUAGE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})?$")
 
 
 @dataclass
@@ -31,6 +34,9 @@ class RuntimeSettings:
     auto_export_on_complete: bool = False
     reconnect_max_attempts: int = 5
     comment_poll_seconds: int = 10
+    speech_subtitles_enabled: bool = True
+    speech_model: str = "large-v3"
+    speech_language: str = "ja"
 
     def __post_init__(self) -> None:
         if not self.tiktok_engine_order:
@@ -88,6 +94,12 @@ def validate_runtime(raw: dict[str, object]) -> RuntimeSettings:
     names = [str(item) for item in order]
     if len(names) != len(set(names)) or any(name not in ENGINE_NAMES for name in names):
         raise SettingsValidationError("録画エンジンの順序が不正です")
+    speech_model = str(data["speech_model"])
+    if speech_model not in SPEECH_MODELS:
+        raise SettingsValidationError("字幕モデルが不正です")
+    speech_language = str(data["speech_language"]).strip().lower()
+    if not _SPEECH_LANGUAGE.fullmatch(speech_language):
+        raise SettingsValidationError("字幕の言語が不正です")
     return RuntimeSettings(
         monitor_interval_seconds=interval,
         max_concurrent_recordings=concurrent,
@@ -103,6 +115,9 @@ def validate_runtime(raw: dict[str, object]) -> RuntimeSettings:
         auto_export_on_complete=_as_bool(data["auto_export_on_complete"]),
         reconnect_max_attempts=reconnects,
         comment_poll_seconds=poll,
+        speech_subtitles_enabled=_as_bool(data["speech_subtitles_enabled"]),
+        speech_model=speech_model,
+        speech_language=speech_language,
     )
 
 

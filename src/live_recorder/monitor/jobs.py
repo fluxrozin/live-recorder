@@ -41,6 +41,7 @@ from live_recorder.recording.policy import (
     recording_result,
 )
 from live_recorder.recording.process import run_process
+from live_recorder.speech.queue import assign_speech_queue
 from live_recorder.timeutil import utcnow
 
 log = logging.getLogger(__name__)
@@ -258,6 +259,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             container = None
             duration = None
             size = outcome.size
+            has_media = False
             if path.is_file() and path.stat().st_size > 0:
                 final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
                 final_path = final.path
@@ -265,6 +267,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                 container = final.container
                 duration = final.duration_ms
                 size = final.size
+                has_media = final.has_media
             async with db.session() as session:
                 repo = Repository(session)
                 segment = await session.get(
@@ -279,6 +282,12 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     segment.duration_ms = duration
                     segment.container_format = container
                     segment.validation_status = validation
+                    speech_runtime = await load_runtime(session)
+                    assign_speech_queue(
+                        segment,
+                        enabled=speech_runtime.speech_subtitles_enabled,
+                        has_media=has_media,
+                    )
                 if job is not None:
                     if outcome.kind == ACCESS_DENIED or (outcome.kind == INTERRUPTED and size < 64 * 1024):
                         await repo.mark_engine(engine, ok=False, reason=outcome.error or outcome.kind)
@@ -743,14 +752,17 @@ async def close_recording_if_idle(
         job = await repo.get_recording_job(job_id)
         if job is None:
             return
+        speech_enabled = (await load_runtime(session)).speech_subtitles_enabled
         for segment in await repo.segments_for_job(job_id):
             if segment.finished_at is not None or segment.file_removed:
                 continue
+            has_media = False
             try:
                 path = resolve_stored(settings.recordings_dir, segment.file_path)
             except ValueError:
                 segment.finished_at = utcnow()
                 segment.validation_status = "invalid"
+                assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
                 continue
             if path.is_file() and path.stat().st_size > 0:
                 final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
@@ -759,10 +771,12 @@ async def close_recording_if_idle(
                 segment.duration_ms = final.duration_ms
                 segment.container_format = final.container
                 segment.validation_status = final.validation
+                has_media = final.has_media
             else:
                 segment.validation_status = "invalid"
                 segment.file_size = 0
             segment.finished_at = utcnow()
+            assign_speech_queue(segment, enabled=speech_enabled, has_media=has_media)
         if finish and job.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
             repo.finish_recording(job, target, "worker restarted" if target != RecordingStatus.COMPLETED else None)
         await session.commit()

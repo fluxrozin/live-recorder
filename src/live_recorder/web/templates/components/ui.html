@@ -161,6 +161,13 @@ id="{{ poll_id }}" data-poll="30" hx-get="{{ url }}" hx-trigger="every 30s, lr:r
 {%- endmacro %}
 
 {#- ページネーション。hx=True で結果領域 (#results) だけを差し替える -#}
+{% macro time_order(order) -%}
+<div class="c-segmented" role="group" aria-label="時系列">
+  <a href="{{ url_with(request, order='asc', page='') }}"{% if order == 'asc' %} aria-current="page"{% endif %}>古い順</a>
+  <a href="{{ url_with(request, order='desc', page='') }}"{% if order == 'desc' %} aria-current="page"{% endif %}>新しい順</a>
+</div>
+{%- endmacro %}
+
 {% macro pagination(page, pages, total, page_size, hx=False) -%}
 {%- set first = (page - 1) * page_size + 1 if total else 0 -%}
 {%- set last = [page * page_size, total]|min -%}

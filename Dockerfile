@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS runtime
 
 # Debian bookworm の FFmpeg 5.1 は TikTok FLV の HEVC（codec id 12）を読めず、MP4 化が 0 バイトになる。
 # 8.1 以降がその形式を demux できる。LGPL の配布バイナリを固定して入れる。
@@ -36,3 +36,12 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "live_recorder.web.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]
+
+FROM runtime AS transcriber
+
+RUN pip install --no-cache-dir "/app[speech]"
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib \
+    HF_HOME=/data/config/huggingface
+
+FROM runtime

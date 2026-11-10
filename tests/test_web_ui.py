@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
@@ -96,7 +97,7 @@ def test_no_inline_script_style_or_handlers(name, scenario):
 def test_shell_has_navigation_and_logout(name):
     html = render_page(name, "normal")
     collector = parse(html)
-    for href in ("/", "/streamers", "/recordings", "/comments", "/settings", "/system"):
+    for href in ("/", "/streamers", "/recordings", "/comments", "/speech", "/settings", "/system"):
         assert f'href="{href}"' in html
     assert any(f["attrs"].get("action") == "/logout" for f in collector.forms)
     assert 'aria-current="page"' in html
@@ -175,6 +176,11 @@ def test_streamer_delete_dialog_and_edit_form():
         "comments_enabled",
     } <= field_names(forms["/streamers/1/edit"])
     assert "confirm" in field_names(forms["/streamers/1/delete"])
+    assert "speech_words" in field_names(forms["/streamers/1/speech-words"])
+    assert "さくら" in html
+    listing = render_page("streamers.html", "normal")
+    assert 'href="/streamers/1/edit#speech-words"' not in listing
+    assert listing.count('href="/streamers/1/edit"') == 1
     listing = render_page("streamers.html", "normal")
     add = next(f for f in parse(listing).forms if f["attrs"].get("action") == "/streamers")
     assert {
@@ -224,31 +230,45 @@ def test_streamer_names_are_escaped():
 
 
 def test_comment_pagination_and_export_keep_filters():
-    query = "q=hello&user_id=u1&streamer_id=2&page=3"
+    query = "q=hello&user_id=u1&session_id=101&page=3"
     html = render("comments.html", fx.comments_context("stress", query))
     links = re.findall(r'href="(/comments[^"]*)"', html)
     paging = [link for link in links if "page=" in link and "export" not in link]
     assert paging
     for link in paging:
-        assert "q=hello" in link and "user_id=u1" in link and "streamer_id=2" in link
+        assert "q=hello" in link and "user_id=u1" in link and "session_id=101" in link
     exports = [link for link in links if link.startswith("/comments/export")]
     assert {re.search(r"format=(\w+)", link).group(1) for link in exports} == {"srt"}
     for link in exports:
-        assert "q=hello" in link and "user_id=u1" in link and "page=" not in link
+        assert "q=hello" in link and "user_id=u1" in link and "session_id=101" in link and "page=" not in link
     search = next(f for f in parse(html).forms if f["attrs"].get("hx-get") == "/comments")
     assert search["attrs"]["hx-target"] == "#results"
     assert search["attrs"]["hx-select"] == "#results"
     assert search["attrs"]["hx-push-url"] == "true"
-    assert {
-        "q",
-        "user_id",
-        "nickname",
-        "streamer_id",
-        "platform",
-        "session_id",
-        "start",
-        "end",
-    } <= field_names(search)
+    names = field_names(search)
+    assert {"q", "user_id", "nickname", "session_id", "start", "end"} <= names
+    assert "streamer_id" not in names and "platform" not in names
+
+
+def test_viewers_switch_between_oldest_and_newest():
+    comments = render_page("comments.html", "normal")
+    assert 'aria-label="時系列"' in comments
+    assert 'aria-current="page">新しい順' in comments
+    assert "order=asc" in comments and "order=desc" in comments
+    speech = render_page("speech_cues.html", "normal")
+    assert 'aria-current="page">古い順' in speech
+    assert "order=asc" in speech and "order=desc" in speech
+
+
+def test_comment_index_lists_recordings_before_messages():
+    html = render_page("comments_index.html", "normal")
+    assert 'href="/comments?session_id=100"' in html
+    assert "コメントを見る" in html
+    assert "発話" not in html
+    assert "コメント本文を検索" not in html
+    filtered = render("comments_index.html", fx.comments_index_context("stress", "streamer_id=1"))
+    assert 'value="1" selected' in filtered or 'value="1" selected' in filtered.replace("  ", " ")
+    assert "streamer_id=1" in filtered
 
 
 def test_recording_pagination_keeps_filters():
@@ -265,12 +285,68 @@ def test_recording_pagination_keeps_filters():
 def test_segment_download_only_when_file_exists():
     html = render_page("recording_detail.html", "normal")
     assert "最終確認" in html
+    assert html.count("c-status--badge") == 3
     assert 'href="/recordings/segments/1/download"' in html
     assert "/segments/2/download" not in html
     assert "/segments/3/download" not in html
+    assert 'href="/recordings/segments/1/speech"' in html
+    assert "/segments/2/speech" not in html
+    assert 'href="/speech?session_id=101"' in html
+    assert "音声字幕 (SRT)" in html
+    assert 'href="/speech/cues?session_id=101"' in html
+    assert "字幕を見る" in html
+    assert ">コメント</a>" in html
+    assert 'action="/speech/' not in html
+    assert "再生成" not in html
+    assert "発話なし" not in html
+    assert "モデルを読み込めませんでした" in html
     assert "ファイルなし" in html and "削除済み" in html
     for segment_id in (1, 2, 3):
         assert f"segment_id={segment_id}&amp;format=srt" in html
+    assert re.search(
+        r'c-table__secondary">〜 <time[^>]*>\d{2}/\d{2} \d{2}:\d{2}</time></span>', html
+    )
+    assert "〜 記録中" in html
+
+
+def test_speech_page_shows_queue_download_and_regenerate():
+    html = render_page("speech.html", "normal")
+    assert ">SRT</a>" in html
+    assert "SRT をダウンロード" not in html
+    assert 'href="/recordings/segments/1/speech"' in html
+    assert 'href="/speech/cues?segment_id=1"' in html
+    assert ">字幕を見る</a>" in html
+    assert 'class="c-row-actions"' in html
+    assert ">本文</a>" not in html
+    assert "/recordings/segments/2/speech" not in html
+    assert 'action="/speech/1/retry"' in html
+    assert 'action="/speech/2/retry"' in html
+    assert 'action="/speech/4/retry"' not in html
+    assert "モデルを読み込めませんでした" in html
+    assert 'action="/speech/retry-failed"' in html
+    assert "失敗 1 件を再生成" in html
+    assert "処理中" in html
+
+
+def test_speech_cues_read_like_comments():
+    html = render_page("speech_cues.html", "normal")
+    assert "字幕本文" in html
+    assert "発話 1 です" in html
+    assert "&lt;script&gt;alert" in html
+    assert "<script>alert" not in html
+    assert "00:00:00" in html
+    assert 'hx-get="/speech/cues"' in html
+    assert 'href="/recordings/segments/1/speech"' in html
+    assert 'href="/recordings/101"' in html
+    assert "すべてのファイル" in html
+
+
+def test_speech_page_filter_and_disabled_notice():
+    html = render_page("speech.html", "stress")
+    assert "自動作成はオフです" in html
+    assert 'value="failed" selected' in html
+    assert "session_id=101" in html
+    assert "失敗 3 件を再生成" in html
 
 
 SETTINGS_FIELDS = {
@@ -290,6 +366,9 @@ SETTINGS_FIELDS = {
     "comment_poll_seconds",
     "reconnect_max_attempts",
     "log_level",
+    "speech_subtitles_enabled",
+    "speech_model",
+    "speech_language",
 }
 
 
@@ -401,6 +480,8 @@ def test_live_pages_refresh_without_settings_or_login():
         "streamers.html": ("streamers-poll", "streamers-live"),
         "recordings.html": ("recordings-poll", "recording-results"),
         "comments.html": ("comments-poll", "results"),
+        "comments_index.html": ("comments-index-poll", "comments-index"),
+        "speech_cues.html": ("speech-cues-poll", "results"),
         "recording_detail.html": ("recording-poll", "recording-live"),
         "system.html": ("system-poll", "system-live"),
     }
@@ -455,6 +536,16 @@ def test_flash_renders_as_toast_and_inline_alert():
     assert html.count("削除できません") == 2
     context["flash"] = {"message": "保存しました", "tone": "success"}
     assert render("dashboard.html", context).count("保存しました") == 1
+
+
+def test_short_time_includes_the_date_on_the_same_day():
+    now = datetime(2026, 11, 10, 4, 0, tzinfo=timezone.utc)
+    today = datetime(2026, 11, 10, 3, 15, 9, tzinfo=timezone.utc)
+    earlier = datetime(2026, 1, 2, 0, 5, tzinfo=timezone.utc)
+    last_year = datetime(2025, 6, 1, 3, 0, tzinfo=timezone.utc)
+    assert ui.short_time(today, "Asia/Tokyo", now) == "11/10 12:15"
+    assert ui.short_time(earlier, "Asia/Tokyo", now) == "01/02 09:05"
+    assert ui.short_time(last_year, "Asia/Tokyo", now) == "2025/06/01 12:00"
 
 
 def test_status_info_handles_unknown_codes():
@@ -523,12 +614,18 @@ def test_existing_routes_are_kept(tmp_path):
         ("POST", "/streamers"),
         ("GET", "/streamers/{streamer_id}/edit"),
         ("POST", "/streamers/{streamer_id}/edit"),
+        ("POST", "/streamers/{streamer_id}/speech-words"),
         ("POST", "/streamers/{streamer_id}/toggle"),
         ("POST", "/streamers/{streamer_id}/delete"),
         ("GET", "/recordings"),
         ("GET", "/recordings/{session_id}"),
         ("POST", "/recordings/{session_id}/delete"),
         ("GET", "/recordings/segments/{segment_id}/download"),
+        ("GET", "/recordings/segments/{segment_id}/speech"),
+        ("GET", "/speech"),
+        ("GET", "/speech/cues"),
+        ("POST", "/speech/retry-failed"),
+        ("POST", "/speech/{segment_id}/retry"),
         ("POST", "/recordings/{session_id}/delete-files"),
         ("GET", "/comments"),
         ("GET", "/comments/export"),

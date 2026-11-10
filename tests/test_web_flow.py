@@ -175,10 +175,13 @@ def test_pages_render_with_real_data(client):
     assert "<html" not in partial and "配信中の人" in partial
     detail = client.get(f"/recordings/{session_id}").text
     assert detail.count("/download") == 1, "保存されているセグメントだけダウンロードできる"
-    comments = client.get("/comments").text
+    index = client.get("/comments").text
+    assert "録画を選ぶと" in index and f"/comments?session_id={session_id}" in index
+    comments = client.get(f"/comments?session_id={session_id}").text
     assert XSS not in comments and "&lt;script&gt;" in comments
     assert comments.index("&lt;script&gt;") < comments.index("古いコメント")
-    exported = client.get("/comments/export?format=srt")
+    assert client.get("/comments/export?format=srt").status_code == 400
+    exported = client.get(f"/comments/export?session_id={session_id}&format=srt")
     assert exported.status_code == 200
     assert exported.headers["content-type"].startswith("application/x-subrip")
     assert "-->" in exported.text
@@ -277,6 +280,9 @@ def test_settings_roundtrip_and_validation_keep_values(client):
         "reconnect_max_attempts": value("reconnect_max_attempts"),
         "log_level": selected("log_level"),
         "comments_globally_enabled": "on",
+        "speech_subtitles_enabled": "on",
+        "speech_model": selected("speech_model"),
+        "speech_language": value("speech_language"),
     }
     saved = client.post(
         "/settings", data={**form, "active_tab": "settings-comments"}, follow_redirects=False
@@ -315,13 +321,11 @@ def test_settings_roundtrip_and_validation_keep_values(client):
 
 def test_comment_partial_and_export_keep_filters(client):
     _login(client)
-    response = client.get("/comments?q=script", headers={"HX-Request": "true"})
+    session_id = client.ids["session"]
+    response = client.get(f"/comments?session_id={session_id}&q=script", headers={"HX-Request": "true"})
     assert response.status_code == 200 and 'id="results"' in response.text
-    assert (
-        "/comments/export?q=script&amp;format=srt" in response.text
-        or "format=srt&amp;q=script" in response.text
-    )
-    export = client.get("/comments/export?q=script&format=srt")
+    assert "q=script" in response.text and "format=srt" in response.text
+    export = client.get(f"/comments/export?session_id={session_id}&q=script&format=srt")
     assert export.status_code == 200 and "attachment" in export.headers["content-disposition"]
 
 

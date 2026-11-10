@@ -39,7 +39,7 @@
 {%- endmacro %}
 
 {% block content %}
-{{ ui.page_header("設定", "監視・録画・コメント収集の動作を設定します。保存した値は、ワーカーの次の監視周期で反映されます。") }}
+{{ ui.page_header("設定", "監視・録画・コメント収集・音声字幕の動作を設定します。保存した値は、ワーカーの次の監視周期で反映されます。") }}
 
 {% if error %}
 {{ ui.alert("danger", title="設定を保存できませんでした", text=error ~ "。入力内容は保持されています。修正してから再度保存してください。", role="alert") }}
@@ -50,6 +50,7 @@
   ("recording", "録画", "Recording", "video"),
   ("tiktok", "TikTok", "TikTok", "music-2"),
   ("comments", "コメント", "Comments", "message-circle"),
+  ("speech", "字幕", "Speech", "file-text"),
   ("advanced", "詳細", "Advanced", "sliders-horizontal"),
   ("environment", "環境", "Environment", "server"),
 ] %}
@@ -137,6 +138,33 @@
       {{ number_setting("comment_retention_days", "コメントの保存期限", runtime.comment_retention_days, "コメントを保存しておく日数です。0 は無期限です。", "日", min=0) }}
       {{ switch_setting("auto_export_on_complete", "完了時に自動エクスポート", runtime.auto_export_on_complete, "コメント収集が完了したとき、録画ファイルと同じ場所へ、セグメント先頭からの経過時間で付けた SRT をセグメントごとに書き出します。") }}
       {{ number_setting("comment_poll_seconds", "Twitcasting のコメント取得間隔", runtime.comment_poll_seconds, "Twitcasting API からコメントを取得する間隔です（5〜120秒）。", "秒", min=5, max=120) }}
+    </section>
+
+    <section class="c-card" id="settings-speech" role="tabpanel" aria-labelledby="settings-speech-title">
+      {{ panel_header("settings-speech", "字幕", "Speech", "確定した録画の音声を文字起こしし、セグメントごとの SRT を作ります。配信中には処理しません。") }}
+      {{ switch_setting("speech_subtitles_enabled", "音声字幕を有効にする", runtime.speech_subtitles_enabled, "OFF にすると、新しく確定したセグメントは待ち行列に入りません。画面からの再生成は続きます。") }}
+      <div class="c-setting">
+        <div class="c-setting__text">
+          <label class="c-setting__label" for="s-speech_model">モデル</label>
+          <p class="c-hint" id="s-speech_model-hint">既定は large-v3 です。処理が追いつかないときは large-v3-turbo にします。</p>
+        </div>
+        <div class="c-setting__control">
+          <select class="c-select" id="s-speech_model" name="speech_model" aria-describedby="s-speech_model-hint">
+            {% for model in ["large-v3", "large-v3-turbo"] %}
+            <option value="{{ model }}"{% if runtime.speech_model == model %} selected{% endif %}>{{ model }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="c-setting">
+        <div class="c-setting__text">
+          <label class="c-setting__label" for="s-speech_language">言語</label>
+          <p class="c-hint" id="s-speech_language-hint">Whisper の言語コードです。日本語は ja です。</p>
+        </div>
+        <div class="c-setting__control">
+          <input class="c-input" type="text" id="s-speech_language" name="speech_language" value="{{ runtime.speech_language }}" required maxlength="16" pattern="[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?" aria-describedby="s-speech_language-hint">
+        </div>
+      </div>
     </section>
 
     <section class="c-card" id="settings-advanced" role="tabpanel" aria-labelledby="settings-advanced-title">

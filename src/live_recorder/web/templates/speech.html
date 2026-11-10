@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% set active_nav = "speech" %}
+{% block title %}音声字幕{% endblock %}
+{% block content %}
+{{ ui.page_header("音声字幕", "確定した録画を1本ずつ文字起こしします。処理状況の確認、完成した SRT のダウンロード、再生成はここから行います。") }}
+
+{%- set status_codes = ["pending", "running", "completed", "failed", "skipped", "none"] -%}
+{%- set status_labels = {"pending": "待機", "running": "処理中", "completed": "完了", "failed": "失敗", "skipped": "対象外", "none": "未設定"} -%}
+{%- set chips = [] -%}
+{%- if filters.status %}{% set _ = chips.append(("状態", status_labels[filters.status], "status")) %}{% endif -%}
+{%- if filters.session_id %}{% set _ = chips.append(("録画", "#" ~ filters.session_id, "session_id")) %}{% endif %}
+
+<section class="c-card" aria-labelledby="speech-results-title">
+  <form method="get" action="/speech" role="search" aria-label="音声字幕の絞り込み">
+    <div class="c-filter-bar">
+      <div class="c-field">
+        <label class="c-label" for="f-speech-status">状態</label>
+        <select class="c-select" id="f-speech-status" name="status">
+          <option value="">すべて</option>
+          {% for code in status_codes %}
+          <option value="{{ code }}"{% if filters.status == code %} selected{% endif %}>{{ status_labels[code] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% if filters.session_id %}
+      <input type="hidden" name="session_id" value="{{ filters.session_id }}">
+      {% endif %}
+      <div class="c-filter-bar__actions">
+        <button type="submit" class="c-btn c-btn--primary">{{ ui.icon("search", "sm") }}絞り込む</button>
+      </div>
+    </div>
+  </form>
+  <div {{ ui.live_poll("speech-poll", "speech-live", url_with(request)) }}>
+  <div id="speech-live" class="c-live">
+  {% if not enabled %}
+  {{ ui.alert("info", title="自動作成はオフです", text="新しく確定したセグメントは待ち行列に入りません。この画面からの再生成は続きます。") }}
+  {% endif %}
+  <section class="c-metrics" aria-label="字幕の処理状況">
+    {{ ui.metric("待機", "{:,}".format(counts.pending), "clock", "これから処理します") }}
+    {{ ui.metric("処理中", "{:,}".format(counts.running), "loader-circle", "GPU で文字起こし中") }}
+    {{ ui.metric("失敗", "{:,}".format(counts.failed), "circle-x", "再生成できます", "danger" if counts.failed else "") }}
+    {{ ui.metric("完了", "{:,}".format(counts.completed), "circle-check", "SRT があるものと発話なしを含みます") }}
+  </section>
+  {% if counts.failed %}
+  <form method="post" action="/speech/retry-failed">
+    {{ ui.csrf_input() }}
+    <input type="hidden" name="next" value="{{ url_with(request, status='failed') }}">
+    <button type="submit" class="c-btn">{{ ui.icon("refresh-cw", "sm") }}失敗 {{ counts.failed }} 件を再生成</button>
+  </form>
+  {% endif %}
+  <div class="c-toolbar">
+    <h2 class="c-toolbar__summary" id="speech-results-title">
+      <span><strong>{{ "{:,}".format(total) }}</strong> 件</span>
+      {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
+    </h2>
+    {{ ui.filter_chips(chips, "/speech") }}
+    <span class="u-spacer"></span>
+    {{ ui.poll_status(rendered_at, tz) }}
+  </div>
+
+  {% if items %}
+  <div class="c-table-wrap">
+    <table class="c-table c-table--stack">
+      <thead>
+        <tr>
+          <th scope="col">配信者</th>
+          <th scope="col">録画ファイル</th>
+          <th scope="col">確定</th>
+          <th scope="col" class="is-num">時間</th>
+          <th scope="col">状態</th>
+          <th scope="col" class="is-actions"><span class="u-sr-only">操作</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td class="is-span">
+            <div class="c-table__cell-stack">
+              <span class="u-truncate">{{ item.name }}</span>
+              <span class="c-table__secondary">{{ ui.platform(item.platform) }}</span>
+            </div>
+          </td>
+          <td data-label="録画ファイル">
+            <a class="u-mono u-break" href="/recordings/{{ item.session_id }}">{{ item.file_name }}</a>
+          </td>
+          <td data-label="確定" class="u-nowrap">{{ ui.time(item.finished_at, tz) }}</td>
+          <td class="is-num" data-label="時間">{{ item.duration_ms|duration }}</td>
+          <td data-label="状態">
+            <div class="c-table__cell-stack">
+              {{ ui.status("speech", item.speech_status) }}
+              {% if item.speech_error %}
+              <span class="c-table__secondary u-break">{{ item.speech_error }}</span>
+              {% elif item.speech_empty %}
+              <span class="c-table__secondary">発話なし</span>
+              {% endif %}
+            </div>
+          </td>
+          <td class="is-actions is-span">
+            <div class="c-row-actions">
+              {% if item.speech_ready %}
+              <a class="c-btn c-btn--sm" href="/speech/cues?segment_id={{ item.id }}">{{ ui.icon("file-text", "sm") }}字幕を見る</a>
+              <a class="c-btn c-btn--sm" href="/recordings/segments/{{ item.id }}/speech" download aria-label="{{ item.file_name }} の音声字幕をダウンロード">{{ ui.icon("download", "sm") }}SRT</a>
+              {% endif %}
+              {% if item.can_requeue %}
+              <form method="post" action="/speech/{{ item.id }}/retry">
+                {{ ui.csrf_input() }}
+                <input type="hidden" name="next" value="{{ url_with(request) }}">
+                <button type="submit" class="c-btn c-btn--sm">{{ ui.icon("refresh-cw", "sm") }}再生成</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.pagination(page, pages, total, 20) }}
+  {% elif chips %}
+  {% call ui.empty("search", "条件に一致する字幕はありません", "条件を変更するか、リセットしてすべてを表示してください。") %}
+    <a class="c-btn" href="/speech">{{ ui.icon("rotate-ccw", "sm") }}条件をリセット</a>
+  {% endcall %}
+  {% else %}
+  {{ ui.empty("file-text", "字幕の対象はまだありません", "録画が確定すると、ここに処理状況が表示されます。") }}
+  {% endif %}
+  </div>
+  </div>
+</section>
+{% endblock %}

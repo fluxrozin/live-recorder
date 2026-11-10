@@ -302,6 +302,10 @@ def recording_detail_context(scenario: str) -> dict:
                 "removed": False,
                 "exists": True,
                 "name": "20261109_120000_sakura_001.mp4",
+                "speech_status": "completed",
+                "speech_ready": True,
+                "speech_empty": False,
+                "speech_error": "",
             },
             {
                 "id": 2,
@@ -315,6 +319,10 @@ def recording_detail_context(scenario: str) -> dict:
                 "removed": False,
                 "exists": False,
                 "name": "20261109_130000_sakura_002_" + "x" * 80 + ".mp4",
+                "speech_status": "failed",
+                "speech_ready": False,
+                "speech_empty": False,
+                "speech_error": "モデルを読み込めませんでした",
             },
             {
                 "id": 3,
@@ -328,6 +336,10 @@ def recording_detail_context(scenario: str) -> dict:
                 "removed": True,
                 "exists": False,
                 "name": "20261109_140000_sakura_003.ts",
+                "speech_status": "NONE",
+                "speech_ready": False,
+                "speech_empty": False,
+                "speech_error": "",
             },
         ]
     )
@@ -356,6 +368,7 @@ def recording_detail_context(scenario: str) -> dict:
         "comment_error": "",
         "comment_last_received_at": now - timedelta(minutes=31),
         "comments_total": 15301,
+        "speech_cue_count": 0 if scenario == "empty" else 12,
         "recording_started_at": now - timedelta(hours=3),
         "recording_finished_at": now - timedelta(minutes=30),
         "recording_retries": 1,
@@ -383,6 +396,8 @@ def recording_detail_context(scenario: str) -> dict:
 def comments_context(scenario: str, query: str = "") -> dict:
     now = utcnow()
     count = {"empty": 0, "normal": 8, "stress": 50}[scenario]
+    if "session_id=" not in query:
+        query = f"session_id=101&{query}" if query else "session_id=101"
     comments = [
         {
             "when": now - timedelta(seconds=i * 13),
@@ -414,6 +429,7 @@ def comments_context(scenario: str, query: str = "") -> dict:
             key, value = part.split("=", 1)
             if key in filters:
                 filters[key] = value
+    filters["session_id"] = filters["session_id"] or "101"
     total = 12_345 if scenario == "stress" else count
     return base_context(
         "/comments",
@@ -423,7 +439,50 @@ def comments_context(scenario: str, query: str = "") -> dict:
         page=3 if scenario == "stress" else 1,
         pages=max(1, (total + 49) // 50),
         filters=filters,
-        streamers=[{"id": 1, "name": "さくら"}, {"id": 2, "name": "ツイキャス配信者"}],
+        order="desc",
+        session={
+            "id": int(filters["session_id"]),
+            "name": "さくら",
+            "platform": "tiktok",
+            "title": LONG_TITLE if scenario == "stress" else "雑談配信",
+            "streamer_id": 1,
+        },
+    )
+
+
+def comments_index_context(scenario: str, query: str = "") -> dict:
+    now = utcnow()
+    count = {"empty": 0, "normal": 4, "stress": 24}[scenario]
+    cards = [
+        {
+            "id": 100 + i,
+            "name": "さくら" if i % 2 else "ツイキャス配信者",
+            "platform": "tiktok" if i % 2 else "twitcasting",
+            "title": LONG_TITLE if i == 0 else f"配信タイトル {i}",
+            "started": now - timedelta(hours=i),
+            "comments": 10 + i,
+        }
+        for i in range(count)
+    ]
+    filters = {"streamer_id": "", "platform": ""}
+    for part in query.split("&"):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            if key in filters:
+                filters[key] = value
+    total = 80 if scenario == "stress" else count
+    return base_context(
+        "/comments",
+        query,
+        cards=cards,
+        total=total,
+        page=2 if scenario == "stress" else 1,
+        pages=max(1, (total + 19) // 20),
+        filters=filters,
+        streamers=[
+            {"id": 1, "name": "さくら", "platform": "tiktok"},
+            {"id": 2, "name": "ツイキャス配信者", "platform": "twitcasting"},
+        ],
     )
 
 
@@ -560,7 +619,8 @@ def streamer_form_context(scenario: str) -> dict:
         if scenario == "stress"
         else _streamer(1, now)
     )
-    return base_context("/streamers/1/edit", row=row, error="")
+    row["speech_words"] = "とても長い固有名詞" * 8 if scenario == "stress" else "さくら\nApex"
+    return base_context("/streamers/1/edit", row=row, error="", words_error="")
 
 
 def login_context(scenario: str) -> dict:
@@ -571,13 +631,139 @@ def login_context(scenario: str) -> dict:
     )
 
 
+def speech_cues_context(scenario: str, query: str = "") -> dict:
+    filters = {"q": "", "session_id": "", "segment_id": "", "file_name": ""}
+    for part in query.split("&"):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            if key in filters:
+                filters[key] = value
+    if scenario == "empty":
+        lines = []
+        files = []
+    else:
+        lines = [
+            {
+                "start_ms": 0,
+                "end_ms": 1500,
+                "text": XSS if i == 0 else (LONG_COMMENT if i == 3 else f"発話 {i} です"),
+                "name": "さくら",
+                "platform": "tiktok",
+                "session_id": 101,
+                "file_name": "20261109_120000_sakura_001.mp4",
+            }
+            for i in range({"normal": 4, "stress": 50}[scenario])
+        ]
+        files = [
+            {"id": 1, "name": "20261109_120000_sakura_001.mp4"},
+            {"id": 2, "name": "20261109_130000_sakura_002.mp4"},
+        ]
+    total = len(lines)
+    return base_context(
+        "/speech/cues",
+        query,
+        lines=lines,
+        total=total,
+        page=1,
+        pages=max(1, (total + 49) // 50),
+        filters=filters,
+        files=files,
+        order="asc",
+        download_url="/recordings/segments/1/speech" if scenario == "normal" else "",
+    )
+
+
+def speech_context(scenario: str) -> dict:
+    now = utcnow()
+    counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0, "none": 0}
+    if scenario == "empty":
+        return base_context(
+            "/speech",
+            items=[],
+            total=0,
+            page=1,
+            pages=1,
+            filters={"status": "", "session_id": ""},
+            counts=counts,
+            enabled=True,
+        )
+    items = [
+        {
+            "id": 1,
+            "session_id": 101,
+            "name": "さくら",
+            "platform": "tiktok",
+            "file_name": "20261109_120000_sakura_001.mp4",
+            "finished_at": now,
+            "duration_ms": 3_600_000,
+            "speech_status": "completed",
+            "speech_ready": True,
+            "speech_empty": False,
+            "speech_error": "",
+            "can_requeue": True,
+        },
+        {
+            "id": 2,
+            "session_id": 101,
+            "name": "さくら",
+            "platform": "tiktok",
+            "file_name": "20261109_130000_sakura_002.mp4",
+            "finished_at": now,
+            "duration_ms": 1_800_000,
+            "speech_status": "failed",
+            "speech_ready": False,
+            "speech_empty": False,
+            "speech_error": "モデルを読み込めませんでした" if scenario == "normal" else "失敗理由 " * 30,
+            "can_requeue": True,
+        },
+        {
+            "id": 4,
+            "session_id": 101,
+            "name": "さくら",
+            "platform": "tiktok",
+            "file_name": "20261109_140000_sakura_004.mp4",
+            "finished_at": now,
+            "duration_ms": 600_000,
+            "speech_status": "running",
+            "speech_ready": False,
+            "speech_empty": False,
+            "speech_error": "",
+            "can_requeue": False,
+        },
+    ]
+    if scenario == "stress":
+        counts = {"pending": 12, "running": 1, "completed": 40, "failed": 3, "skipped": 2, "none": 1}
+        filters = {"status": "failed", "session_id": "101"}
+        enabled = False
+        total = 59
+    else:
+        counts = {"pending": 1, "running": 1, "completed": 1, "failed": 1, "skipped": 0, "none": 0}
+        filters = {"status": "", "session_id": ""}
+        enabled = True
+        total = len(items)
+    return base_context(
+        "/speech",
+        "status=failed&session_id=101" if scenario == "stress" else "",
+        items=items,
+        total=total,
+        page=2 if scenario == "stress" else 1,
+        pages=max(1, (total + 19) // 20),
+        filters=filters,
+        counts=counts,
+        enabled=enabled,
+    )
+
+
 PAGES = {
     "dashboard.html": dashboard_context,
     "streamers.html": streamers_context,
     "streamer_form.html": streamer_form_context,
     "recordings.html": recordings_context,
     "recording_detail.html": recording_detail_context,
+    "speech.html": speech_context,
+    "speech_cues.html": speech_cues_context,
     "comments.html": comments_context,
+    "comments_index.html": comments_index_context,
     "settings.html": settings_context,
     "system.html": system_context,
     "login.html": login_context,

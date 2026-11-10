@@ -4,6 +4,25 @@
 
 `app` のログと `docker compose ps` を見ます。`/healthz` が 503 のときは PostgreSQL に接続できていません。`SESSION_SECRET` が短い、または例示の値のままだとプロセスは起動時に止まります。
 
+## transcriber が起動しない
+
+`transcriber` が次のエラーで落ち、同じ `docker compose up` の `app` も中断されることがあります。
+
+```text
+failed to fulfil mount request: open /usr/lib/wsl/drivers/nv_dispi.inf_amd64_.../NvFBC.dll: no such file or directory
+```
+
+WSL 上の Docker は GPU を渡すとき、`/var/run/cdi/nvidia.yaml` に書かれた Windows ドライバのパスをマウントします。ドライバを更新すると、このディレクトリ名のハッシュが変わります。Windows の再起動で WSL が起動し直されると、有効になっている `nvidia-cdi-refresh.service` が仕様を作り直します。インストーラが再起動を求める通常の更新では、そのあと起動し直すだけで足ります。
+
+同じ WSL セッションを動かしたままドライバディレクトリだけ変わったときは、このサービスが `/usr/lib/wsl/drivers` を監視しないため、古いパスが残ります。仕様を作り直してから、もう一度起動します。
+
+```bash
+sudo systemctl start nvidia-cdi-refresh.service
+docker compose up -d
+```
+
+Windows 側で `wsl --shutdown` してから WSL を開き直しても、同じ再生成が走ります。
+
 ## ワーカーが再起動を繰り返す
 
 ログに「別のワーカーが稼働中です」と出る場合、別の worker コンテナがロックを持っています。プロジェクト内の worker は1つにしてください。前回のプロセスが落ちた直後は、ロック解放を最大30秒待ちます。

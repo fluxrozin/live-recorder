@@ -53,6 +53,13 @@ from live_recorder.platforms.normalize import (
 from live_recorder.recording.files import PathEscape, resolve_stored
 from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.process import command_output
+from live_recorder.speech.queue import requeue_speech
+from live_recorder.speech.srt import read_speech_cues, speech_srt_path, unlink_speech_sidecar
+from live_recorder.speech.words import (
+    SpeechWordsError,
+    normalize_speech_words,
+    speech_words_for_form,
+)
 from live_recorder.timeutil import (
     ensure_aware,
     format_local,
@@ -71,6 +78,7 @@ SETTINGS_TABS = {
     "settings-recording",
     "settings-tiktok",
     "settings-comments",
+    "settings-speech",
     "settings-advanced",
     "settings-environment",
 }
@@ -390,6 +398,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         flash(request, "配信者を更新しました")
         return RedirectResponse("/streamers", status_code=303)
 
+    @app.post("/streamers/{streamer_id}/speech-words")
+    async def streamer_speech_words(request: Request, streamer_id: int):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        form = dict(await request.form())
+        check_csrf(request, form)
+        raw = str(form.get("speech_words") or "")
+        async with request.app.state.db.session() as session:
+            streamer = await Repository(session).get_streamer(streamer_id)
+            if streamer is None:
+                raise HTTPException(404)
+            try:
+                words = normalize_speech_words(raw)
+            except SpeechWordsError as exc:
+                row = _streamer_dict(streamer)
+                row["speech_words"] = raw
+                return await render(
+                    request, "streamer_form.html", row=row, error="", words_error=str(exc), status_code=400
+                )
+            streamer.speech_words = words or None
+            await session.commit()
+        flash(request, "字幕の単語を保存しました")
+        return RedirectResponse(f"/streamers/{streamer_id}/edit#speech-words", status_code=303)
+
     @app.post("/streamers/{streamer_id}/toggle", response_class=HTMLResponse)
     async def streamer_toggle(request: Request, streamer_id: int):
         blocked = await require_user(request)
@@ -518,6 +551,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "comment_error": comment_job.last_error if comment_job else "",
                 "comment_last_received_at": comment_job.last_received_at if comment_job else None,
                 "comments_total": comments_total,
+                "speech_cue_count": _speech_cue_count(root, segments),
                 "recording_started_at": job.started_at if job else None,
                 "recording_finished_at": job.finished_at if job else None,
                 "recording_retries": job.retry_count if job else 0,
@@ -534,6 +568,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "removed": segment.file_removed,
                         "exists": _stored_file_exists(root, segment.file_path) if not segment.file_removed else False,
                         "name": Path(segment.file_path).name,
+                        "speech_status": segment.speech_status or "NONE",
+                        "speech_ready": (
+                            segment.speech_status == "completed"
+                            and not segment.file_removed
+                            and bool(segment.speech_srt_path)
+                            and _stored_file_exists(root, segment.speech_srt_path)
+                        ),
+                        "speech_empty": segment.speech_status == "completed" and not segment.speech_srt_path,
+                        "speech_error": (segment.speech_error or "")[:160],
                     }
                     for segment in segments
                 ],
@@ -581,6 +624,177 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/recordings/segments/{segment_id}/speech")
+    async def download_speech(request: Request, segment_id: int):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        async with request.app.state.db.session() as session:
+            segment = await Repository(session).get_segment(segment_id)
+            if segment is None or segment.file_removed or segment.speech_status != "completed":
+                raise HTTPException(404)
+            relative = segment.speech_srt_path
+            if not relative:
+                raise HTTPException(404)
+            filename = Path(relative).name
+        try:
+            path = resolve_stored(request.app.state.settings.recordings_dir, relative)
+        except PathEscape as exc:
+            raise HTTPException(404) from exc
+        if not path.is_file():
+            raise HTTPException(404)
+        body = path.read_bytes()
+        return Response(
+            content=body,
+            media_type="application/x-subrip; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(body)),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/speech/cues", response_class=HTMLResponse)
+    async def speech_cues_page(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        filters = _speech_cue_filters(request)
+        session_id = filters["query"]["session_id"]
+        segment_id = filters["query"]["segment_id"]
+        needle = filters["raw"]["q"].casefold()
+        async with request.app.state.db.session() as session:
+            repo = Repository(session)
+            if segment_id is not None and session_id is None:
+                matched = await repo.completed_speech_segments(session_id=None, segment_id=segment_id)
+                if matched and matched[0].job and matched[0].job.session:
+                    session_id = matched[0].job.session.id
+            sources = await repo.completed_speech_segments(session_id=session_id, segment_id=None)
+            chosen = [segment for segment in sources if segment_id is None or segment.id == segment_id]
+            files = [{"id": segment.id, "name": Path(segment.file_path).name} for segment in sources]
+            file_name = next((item["name"] for item in files if item["id"] == segment_id), "")
+            payloads = []
+            for segment in chosen:
+                stream = segment.job.session if segment.job is not None else None
+                speaker = stream.streamer if stream is not None else None
+                if not segment.speech_srt_path or stream is None:
+                    continue
+                payloads.append(
+                    {
+                        "relative": segment.speech_srt_path,
+                        "name": speaker.display_name if speaker else "—",
+                        "platform": speaker.platform if speaker else "",
+                        "session_id": stream.id,
+                        "file_name": Path(segment.file_path).name,
+                    }
+                )
+            download_id = chosen[0].id if len(chosen) == 1 else None
+        root = request.app.state.settings.recordings_dir
+        lines: list[dict] = []
+        for item in payloads:
+            try:
+                path = resolve_stored(root, item["relative"])
+            except PathEscape:
+                continue
+            for start_ms, end_ms, text in read_speech_cues(path):
+                if needle and needle not in text.casefold():
+                    continue
+                lines.append(
+                    {
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "text": text,
+                        "name": item["name"],
+                        "platform": item["platform"],
+                        "session_id": item["session_id"],
+                        "file_name": item["file_name"],
+                    }
+                )
+        page = filters["page"]
+        total = len(lines)
+        if filters["raw"]["order"] == "desc":
+            lines.reverse()
+        download_url = f"/recordings/segments/{download_id}/speech" if download_id is not None else ""
+        shown = lines[(page - 1) * 50 : page * 50]
+        return await render(
+            request,
+            "speech_cues.html",
+            lines=shown,
+            total=total,
+            page=page,
+            pages=max(1, (total + 49) // 50),
+            order=filters["raw"]["order"],
+            filters={
+                "q": filters["raw"]["q"],
+                "session_id": str(session_id or ""),
+                "segment_id": str(segment_id or ""),
+                "file_name": file_name,
+            },
+            files=files,
+            download_url=download_url,
+        )
+
+    @app.get("/speech", response_class=HTMLResponse)
+    async def speech_page(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        filters = _speech_filters(request)
+        async with request.app.state.db.session() as session:
+            repo = Repository(session)
+            runtime = await load_runtime(session)
+            rows, total = await repo.search_speech(page=filters["page"], page_size=20, **filters["query"])
+            counts = await repo.speech_counts()
+            root = request.app.state.settings.recordings_dir
+            items = [_speech_row(segment, root) for segment in rows]
+        return await render(
+            request,
+            "speech.html",
+            items=items,
+            total=total,
+            page=filters["page"],
+            pages=max(1, (total + 19) // 20),
+            filters=filters["raw"],
+            counts=counts,
+            enabled=runtime.speech_subtitles_enabled,
+        )
+
+    @app.post("/speech/retry-failed")
+    async def retry_failed_speech(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        form = dict(await request.form())
+        check_csrf(request, form)
+        async with request.app.state.db.session() as session:
+            queued = await Repository(session).requeue_failed_speech()
+            await session.commit()
+        flash(request, f"失敗した字幕 {queued} 件を再生成の待ち行列に入れました")
+        return RedirectResponse(_safe_next(form, "/speech?status=failed"), status_code=303)
+
+    @app.post("/speech/{segment_id}/retry")
+    async def retry_speech(request: Request, segment_id: int):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        form = dict(await request.form())
+        check_csrf(request, form)
+        async with request.app.state.db.session() as session:
+            segment = await Repository(session).get_segment(segment_id)
+            if segment is None:
+                raise HTTPException(404)
+            outcome = requeue_speech(segment)
+            await session.commit()
+        messages = {
+            "queued": ("再生成を待ち行列に入れました", "success"),
+            "pending": ("すでに待ち行列に入っています", "info"),
+            "running": ("処理中のため、終わってから再生成できます", "warning"),
+            "removed": ("削除済みの録画は再生成できません", "warning"),
+        }
+        text, tone = messages.get(outcome, ("再生成できません", "warning"))
+        flash(request, text, tone)
+        return RedirectResponse(_safe_next(form, "/speech"), status_code=303)
+
     @app.post("/recordings/{session_id}/delete-files")
     async def delete_files(request: Request, session_id: int):
         blocked = await require_user(request)
@@ -603,6 +817,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if path.is_file():
                     path.unlink()
                 _unlink_comment_sidecars(path)
+                _unlink_speech_files(request.app.state.settings.recordings_dir, path, segment.speech_srt_path)
                 segment.file_removed = True
             await repo.add_event("file_deleted", "録画ファイルを削除しました", session_id=session_id)
             await session.commit()
@@ -635,6 +850,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     continue
                 if delete_files_too and path.is_file():
                     path.unlink()
+                if delete_files_too:
+                    _unlink_speech_files(request.app.state.settings.recordings_dir, path, segment.speech_srt_path)
                 _unlink_comment_sidecars(path)
             if export_path:
                 try:
@@ -655,38 +872,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return blocked
         tz = await runtime_tz(request)
         filters = _comment_filters(request, tz)
-        async with request.app.state.db.session() as session:
-            repo = Repository(session)
-            rows, total = await repo.search_comments(
-                page=filters["page"], page_size=50, newest_first=True, **filters["query"]
-            )
-            people = await repo.list_streamers()
-            comments = [
-                {
-                    "when": comment.posted_at or comment.received_at,
-                    "streamer": comment.session.streamer.display_name if comment.session and comment.session.streamer else "—",
-                    "platform": comment.session.streamer.platform if comment.session and comment.session.streamer else "",
-                    "user_id": comment.platform_user_id or "—",
-                    "nickname": comment.nickname or "—",
-                    "message": comment.message,
-                    "offset": comment.recording_offset_ms,
-                    "session_id": comment.stream_session_id,
-                }
-                for comment in rows
-            ]
-            streamers = [{"id": person.id, "name": person.display_name} for person in people]
-        return await render(
-            request,
-            "comments.html",
-            tz=tz,
-            comments=comments,
-            total=total,
-            page=filters["page"],
-            pages=max(1, (total + 49) // 50),
-            filters=filters["raw"],
-            streamers=streamers,
-            query=request.url.query,
-        )
+        if filters["query"]["session_id"] is None:
+            extra = await _comment_index_context(request, filters)
+            return await render(request, "comments_index.html", tz=tz, **extra)
+        extra = await _comment_reader_context(request, filters)
+        return await render(request, "comments.html", tz=tz, **extra)
 
     @app.get("/comments/export")
     async def comments_export(request: Request):
@@ -705,6 +895,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             windows, selected = await _export_windows(repo, filters["query"], segment_id)
+            if filters["query"].get("session_id") is None:
+                raise HTTPException(400)
+            _scope_comments_to_session(filters["query"])
             found = await repo.export_comments(**filters["query"])
             body, media, filename = _comment_download(found, windows, selected, tz)
         return Response(
@@ -763,6 +956,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "auto_export_on_complete": _checked(form, "auto_export_on_complete"),
                     "reconnect_max_attempts": form.get("reconnect_max_attempts"),
                     "comment_poll_seconds": form.get("comment_poll_seconds"),
+                    "speech_subtitles_enabled": _checked(form, "speech_subtitles_enabled"),
+                    "speech_model": form.get("speech_model"),
+                    "speech_language": form.get("speech_language"),
                 }
             )
         except (SettingsValidationError, ValueError) as exc:
@@ -936,6 +1132,7 @@ def _streamer_dict(streamer: Streamer) -> dict:
         "monitoring_enabled": streamer.monitoring_enabled,
         "recording_enabled": streamer.recording_enabled,
         "comments_enabled": streamer.comments_enabled,
+        "speech_words": speech_words_for_form(streamer.speech_words),
         "live_status": streamer.live_status,
         "last_checked_at": streamer.last_checked_at,
         "last_live_at": streamer.last_live_at,
@@ -1082,11 +1279,106 @@ def _comment_download(comments, windows, selected: int | None, tz: str) -> tuple
     return buffer.getvalue(), "application/zip", "comments.zip"
 
 
+def _unlink_speech_files(root: Path, video: Path, srt_relative: str | None) -> None:
+    unlink_speech_sidecar(video)
+    if not srt_relative:
+        return
+    try:
+        extra = resolve_stored(root, srt_relative)
+    except PathEscape:
+        return
+    if extra.is_file() and extra != speech_srt_path(video):
+        extra.unlink()
+
+
 def _unlink_comment_sidecars(video: Path) -> None:
     for relative in comment_sidecar_relatives(video.name):
         extra = video.with_name(Path(relative).name)
         if extra.is_file():
             extra.unlink()
+
+
+def _scope_comments_to_session(query: dict) -> None:
+    """選んだ録画以外の条件でコメントを広げない。"""
+    query["streamer_id"] = None
+    query["platform"] = None
+
+
+async def _comment_index_context(request: Request, filters: dict) -> dict:
+    async with request.app.state.db.session() as session:
+        repo = Repository(session)
+        rows, total = await repo.search_commented_sessions(
+            streamer_id=filters["query"]["streamer_id"],
+            platform=filters["query"]["platform"],
+            page=filters["page"],
+            page_size=20,
+        )
+        people = await repo.list_streamers()
+        cards = [
+            {
+                "id": item.id,
+                "name": item.streamer.display_name,
+                "platform": item.streamer.platform,
+                "title": item.title or "タイトルなし",
+                "started": item.detected_at,
+                "comments": count,
+            }
+            for item, count in rows
+        ]
+        streamers = [{"id": person.id, "name": person.display_name, "platform": person.platform} for person in people]
+    return {
+        "cards": cards,
+        "total": total,
+        "page": filters["page"],
+        "pages": max(1, (total + 19) // 20),
+        "filters": filters["raw"],
+        "streamers": streamers,
+    }
+
+
+async def _comment_reader_context(request: Request, filters: dict) -> dict:
+    _scope_comments_to_session(filters["query"])
+    async with request.app.state.db.session() as session:
+        repo = Repository(session)
+        item = await repo.get_session(filters["query"]["session_id"])
+        if item is None:
+            raise HTTPException(404)
+        rows, total = await repo.search_comments(
+            page=filters["page"],
+            page_size=50,
+            newest_first=filters["raw"]["order"] == "desc",
+            **filters["query"],
+        )
+        chosen = {
+            "id": item.id,
+            "name": item.streamer.display_name,
+            "platform": item.streamer.platform,
+            "title": item.title or "タイトルなし",
+            "streamer_id": item.streamer_id,
+        }
+        comments = [
+            {
+                "when": comment.posted_at or comment.received_at,
+                "streamer": comment.session.streamer.display_name if comment.session and comment.session.streamer else "—",
+                "platform": comment.session.streamer.platform if comment.session and comment.session.streamer else "",
+                "user_id": comment.platform_user_id or "—",
+                "nickname": comment.nickname or "—",
+                "message": comment.message,
+                "offset": comment.recording_offset_ms,
+                "session_id": comment.stream_session_id,
+            }
+            for comment in rows
+        ]
+    return {
+        "comments": comments,
+        "total": total,
+        "page": filters["page"],
+        "pages": max(1, (total + 49) // 50),
+        "filters": filters["raw"],
+        "session": chosen,
+        "order": filters["raw"]["order"],
+        "query": request.url.query,
+    }
 
 
 def _comment_filters(request: Request, tz: str) -> dict:
@@ -1106,8 +1398,93 @@ def _comment_filters(request: Request, tz: str) -> dict:
     return {
         "page": _page(params.get("page")),
         "query": query,
-        "raw": {key: params.get(key) or "" for key in ("q", "user_id", "nickname", "streamer_id", "platform", "session_id", "start", "end")},
+        "raw": {
+            key: params.get(key) or ""
+            for key in ("q", "user_id", "nickname", "streamer_id", "platform", "session_id", "start", "end")
+        }
+        | {"order": _list_order(params.get("order"), default="desc")},
     }
+
+
+_SPEECH_FILTERS = {"pending", "running", "completed", "failed", "skipped", "none"}
+
+
+def _speech_cue_count(root: Path, segments) -> int:
+    total = 0
+    for segment in segments:
+        if segment.file_removed or segment.speech_status != "completed" or not segment.speech_srt_path:
+            continue
+        try:
+            path = resolve_stored(root, segment.speech_srt_path)
+        except PathEscape:
+            continue
+        total += len(read_speech_cues(path))
+    return total
+
+
+def _speech_cue_filters(request: Request) -> dict:
+    params = request.query_params
+    session_raw = params.get("session_id") or ""
+    segment_raw = params.get("segment_id") or ""
+    return {
+        "page": _page(params.get("page")),
+        "query": {
+            "session_id": int(session_raw) if session_raw.isdigit() else None,
+            "segment_id": int(segment_raw) if segment_raw.isdigit() else None,
+        },
+        "raw": {"q": (params.get("q") or "").strip(), "order": _list_order(params.get("order"), default="asc")},
+    }
+
+
+def _list_order(value: str | None, *, default: str) -> str:
+    if value in {"asc", "desc"}:
+        return value
+    return default
+
+
+def _speech_filters(request: Request) -> dict:
+    params = request.query_params
+    status = params.get("status") or ""
+    if status not in _SPEECH_FILTERS:
+        status = ""
+    session_raw = params.get("session_id") or ""
+    session_id = int(session_raw) if session_raw.isdigit() else None
+    return {
+        "page": _page(params.get("page")),
+        "query": {"status": status or None, "session_id": session_id},
+        "raw": {"status": status, "session_id": session_raw if session_id is not None else ""},
+    }
+
+
+def _speech_row(segment, root: Path) -> dict:
+    session = segment.job.session
+    streamer = session.streamer
+    ready = (
+        segment.speech_status == "completed"
+        and bool(segment.speech_srt_path)
+        and _stored_file_exists(root, segment.speech_srt_path)
+    )
+    return {
+        "id": segment.id,
+        "session_id": session.id,
+        "name": streamer.display_name,
+        "platform": streamer.platform,
+        "file_name": Path(segment.file_path).name,
+        "finished_at": segment.finished_at,
+        "duration_ms": segment.duration_ms,
+        "speech_status": segment.speech_status or "NONE",
+        "speech_ready": ready,
+        "speech_empty": segment.speech_status == "completed" and not segment.speech_srt_path,
+        "speech_error": (segment.speech_error or "")[:160],
+        "can_requeue": segment.speech_status not in {"pending", "running"},
+    }
+
+
+def _safe_next(form: dict, default: str) -> str:
+    nxt = str(form.get("next") or "")
+    if nxt.startswith("/") and not nxt.startswith("//") and "\\" not in nxt and ":" not in nxt:
+        return nxt
+    return default
 
 
 def _page(value: str | None) -> int:
@@ -1143,6 +1520,9 @@ def _fallback_runtime(form: dict):
         auto_export_on_complete=_checked(form, "auto_export_on_complete"),
         reconnect_max_attempts=form.get("reconnect_max_attempts", defaults.reconnect_max_attempts),
         comment_poll_seconds=form.get("comment_poll_seconds", defaults.comment_poll_seconds),
+        speech_subtitles_enabled=_checked(form, "speech_subtitles_enabled"),
+        speech_model=str(form.get("speech_model") or defaults.speech_model),
+        speech_language=str(form.get("speech_language") or defaults.speech_language),
     )
 
 

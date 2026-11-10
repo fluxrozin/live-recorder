@@ -15,6 +15,7 @@ from live_recorder.domain.labels import (
     PLATFORM_JA,
     RECORDING_STATUS_JA,
     SESSION_STATUS_JA,
+    SPEECH_STATUS_JA,
 )
 from live_recorder.timeutil import ensure_aware, utcnow
 
@@ -69,6 +70,14 @@ _HEALTH = {
     "error": ("danger", "circle-x", "異常"),
     "unknown": ("neutral", "circle-help", "不明"),
 }
+_SPEECH = {
+    "pending": ("info", "clock"),
+    "running": ("info", "loader-circle"),
+    "completed": ("success", "circle-check"),
+    "failed": ("danger", "circle-x"),
+    "skipped": ("neutral", "minus"),
+    "NONE": ("neutral", "minus"),
+}
 _VALIDATION = {
     "ok": ("success", "circle-check", "検証済み"),
     "pending": ("info", "clock", "検証待ち"),
@@ -101,6 +110,11 @@ def status_info(kind: str, code: object) -> dict[str, object]:
         tone, icon, label = _SEVERITY.get(raw.lower(), (tone, icon, label))
     elif kind == "health":
         tone, icon, label = _HEALTH.get(raw, (tone, icon, label))
+    elif kind == "speech":
+        key = raw or "NONE"
+        if key in _SPEECH:
+            tone, icon = _SPEECH[key]
+            label = SPEECH_STATUS_JA.get(key, key)
     elif kind == "validation":
         tone, icon, label = _VALIDATION.get(raw, (tone, icon, label))
     return {"tone": tone, "icon": icon, "label": label, "code": raw, "pulse": icon == "dot"}
@@ -152,14 +166,12 @@ def iso(value: datetime | None) -> str:
 
 
 def short_time(value: datetime | None, tz_name: str, now: datetime | None = None) -> str:
-    """当日は時刻のみ、同年は月日と時刻、それ以外は年月日を表示する。"""
+    """同年は月日と時刻、それ以外は年月日を表示する。"""
     if value is None:
         return "—"
     zone = _zone(tz_name)
     local = ensure_aware(value).astimezone(zone)
     current = ensure_aware(now or utcnow()).astimezone(zone)
-    if local.date() == current.date():
-        return local.strftime("%H:%M:%S")
     if local.year == current.year:
         return local.strftime("%m/%d %H:%M")
     return local.strftime("%Y/%m/%d %H:%M")

@@ -23,6 +23,7 @@ from live_recorder.platforms.types import LiveObservation
 from live_recorder.recording.files import resolve_stored
 from live_recorder.recording.finalize import allow_new_recording, disk_free
 from live_recorder.recording.process import command_output
+from live_recorder.speech.srt import unlink_speech_sidecar
 from live_recorder.timeutil import utcnow
 from live_recorder.versions import tiktoklive_status, tool_version
 
@@ -460,6 +461,7 @@ class Supervisor:
             return
         if path.is_file():
             path.unlink()
+        unlink_speech_sidecar(path)
 
     async def _event(self, event_type: str, message: str, *, severity: str) -> None:
         async with self.db.session() as session:

@@ -149,27 +149,28 @@ class FinalFile:
     duration_ms: int | None
     size: int
     validation: str
+    has_media: bool
 
 
 async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFile:
     probed = await probe_file(ffprobe, source)
     if not probed.has_media:
         status = "partial" if probed.size > 0 else "invalid"
-        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status)
+        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, False)
     if source.suffix.lower() == ".mp4" and probed.ok:
-        return FinalFile(source, probed.container or "mp4", probed.duration_ms, probed.size, "ok")
+        return FinalFile(source, probed.container or "mp4", probed.duration_ms, probed.size, "ok", True)
     target = _mp4_target(source)
     remuxed = await remux_to_mp4(ffmpeg, source, target, probed.video_codec)
     if not remuxed:
         status = "ok" if probed.ok else "partial"
-        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status)
+        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
     checked = await probe_file(ffprobe, target)
     if checked.ok:
         source.unlink(missing_ok=True)
-        return FinalFile(target, checked.container or "mp4", checked.duration_ms, checked.size, "ok")
+        return FinalFile(target, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True)
     target.unlink(missing_ok=True)
     status = "ok" if probed.ok else "partial"
-    return FinalFile(source, probed.container, probed.duration_ms, probed.size, status)
+    return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
 
 
 def _mp4_target(source: Path) -> Path:

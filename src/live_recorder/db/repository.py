@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, case, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -30,6 +30,7 @@ from live_recorder.domain.enums import (
     transition_comments,
     transition_recording,
 )
+from live_recorder.speech.queue import requeue_speech
 from live_recorder.timeutil import utcnow
 
 REC_ACTIVE = tuple(status.value for status in RECORDING_ACTIVE)
@@ -196,6 +197,147 @@ class Repository:
             .order_by(RecordingSegment.segment_number)
         )
         return list(result)
+
+    async def release_running_speech(self) -> None:
+        rows = await self.session.scalars(
+            select(RecordingSegment).where(RecordingSegment.speech_status == "running")
+        )
+        for segment in rows:
+            segment.speech_status = "pending"
+
+    async def claim_next_speech(self) -> RecordingSegment | None:
+        return await self.session.scalar(
+            select(RecordingSegment)
+            .where(
+                RecordingSegment.speech_status == "pending",
+                RecordingSegment.file_removed.is_(False),
+            )
+            .order_by(RecordingSegment.id)
+            .limit(1)
+            .options(
+                selectinload(RecordingSegment.job)
+                .selectinload(RecordingJob.session)
+                .selectinload(StreamSession.streamer)
+            )
+            .with_for_update(skip_locked=True)
+        )
+
+    async def finish_speech(
+        self,
+        segment_id: int,
+        *,
+        status: str,
+        srt_path: str | None,
+        error: str | None,
+        keep_path: bool = False,
+    ) -> None:
+        segment = await self.session.get(RecordingSegment, segment_id)
+        if segment is None:
+            return
+        segment.speech_status = status
+        segment.speech_error = error
+        if not keep_path:
+            segment.speech_srt_path = srt_path
+
+    async def speech_counts(self) -> dict[str, int]:
+        counts = {key: 0 for key in ("pending", "running", "completed", "failed", "skipped", "none")}
+        rows = await self.session.execute(
+            select(RecordingSegment.speech_status, func.count())
+            .where(RecordingSegment.file_removed.is_(False), RecordingSegment.finished_at.is_not(None))
+            .group_by(RecordingSegment.speech_status)
+        )
+        for status, count in rows:
+            key = status if status in counts else "none"
+            counts[key] += int(count)
+        return counts
+
+    def _speech_filters(self, stmt: Select, *, status: str | None, session_id: int | None) -> Select:
+        stmt = stmt.where(RecordingSegment.file_removed.is_(False), RecordingSegment.finished_at.is_not(None))
+        if session_id is not None:
+            stmt = stmt.where(RecordingJob.stream_session_id == session_id)
+        if status == "none":
+            stmt = stmt.where(RecordingSegment.speech_status.is_(None))
+        elif status:
+            stmt = stmt.where(RecordingSegment.speech_status == status)
+        return stmt
+
+    async def search_speech(
+        self,
+        *,
+        status: str | None,
+        session_id: int | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[RecordingSegment], int]:
+        joined = select(RecordingSegment).join(RecordingJob).join(StreamSession)
+        filtered = self._speech_filters(joined, status=status, session_id=session_id)
+        total = int(
+            await self.session.scalar(
+                self._speech_filters(
+                    select(func.count()).select_from(RecordingSegment).join(RecordingJob).join(StreamSession),
+                    status=status,
+                    session_id=session_id,
+                )
+            )
+            or 0
+        )
+        rank = case(
+            (RecordingSegment.speech_status == "running", 0),
+            (RecordingSegment.speech_status == "pending", 1),
+            (RecordingSegment.speech_status == "failed", 2),
+            else_=3,
+        )
+        rows = list(
+            await self.session.scalars(
+                filtered.options(
+                    selectinload(RecordingSegment.job)
+                    .selectinload(RecordingJob.session)
+                    .selectinload(StreamSession.streamer)
+                )
+                .order_by(rank, RecordingSegment.finished_at.desc(), RecordingSegment.id.desc())
+                .offset(max(0, page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        return rows, total
+
+    async def completed_speech_segments(
+        self, *, session_id: int | None, segment_id: int | None
+    ) -> list[RecordingSegment]:
+        stmt = (
+            select(RecordingSegment)
+            .join(RecordingJob)
+            .join(StreamSession)
+            .where(
+                RecordingSegment.file_removed.is_(False),
+                RecordingSegment.speech_status == "completed",
+                RecordingSegment.speech_srt_path.is_not(None),
+            )
+            .options(
+                selectinload(RecordingSegment.job)
+                .selectinload(RecordingJob.session)
+                .selectinload(StreamSession.streamer)
+            )
+            .order_by(RecordingSegment.started_at, RecordingSegment.id)
+        )
+        if session_id is not None:
+            stmt = stmt.where(RecordingJob.stream_session_id == session_id)
+        if segment_id is not None:
+            stmt = stmt.where(RecordingSegment.id == segment_id)
+        return list(await self.session.scalars(stmt))
+
+    async def requeue_failed_speech(self) -> int:
+        rows = await self.session.scalars(
+            select(RecordingSegment).where(
+                RecordingSegment.speech_status == "failed",
+                RecordingSegment.file_removed.is_(False),
+            )
+        )
+        queued = 0
+        for segment in rows:
+            if requeue_speech(segment) == "queued":
+                queued += 1
+        return queued
 
     async def unfinished_segments(self) -> list[RecordingSegment]:
         result = await self.session.scalars(
@@ -435,6 +577,38 @@ class Repository:
             return None
         segment, session_id = row
         return segment, int(session_id)
+
+    async def search_commented_sessions(
+        self,
+        *,
+        streamer_id: int | None,
+        platform: str | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[tuple[StreamSession, int]], int]:
+        """コメントが1件以上ある録画を、新しい順で返す。"""
+        counted = func.count(Comment.id)
+        grouped = (
+            select(StreamSession.id.label("session_id"), counted.label("comments"))
+            .join(Streamer, StreamSession.streamer_id == Streamer.id)
+            .join(Comment, Comment.stream_session_id == StreamSession.id)
+            .group_by(StreamSession.id)
+        )
+        if streamer_id:
+            grouped = grouped.where(StreamSession.streamer_id == streamer_id)
+        if platform:
+            grouped = grouped.where(Streamer.platform == platform)
+        grouped = grouped.subquery()
+        total = int(await self.session.scalar(select(func.count()).select_from(grouped)) or 0)
+        result = await self.session.execute(
+            select(StreamSession, grouped.c.comments)
+            .join(grouped, grouped.c.session_id == StreamSession.id)
+            .options(selectinload(StreamSession.streamer))
+            .order_by(StreamSession.detected_at.desc(), StreamSession.id.desc())
+            .offset(max(0, page - 1) * page_size)
+            .limit(page_size)
+        )
+        return [(row, int(count)) for row, count in result], total
 
     async def comment_count(self, session_id: int) -> int:
         return int(
