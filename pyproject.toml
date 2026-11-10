@@ -1,7 +1,7 @@
 [project]
 name = "live-recorder"
 version = "0.1.0"
-description = "Synology NAS 向け TikTok LIVE / ツイキャス自動録画・コメント記録"
+description = "TikTok LIVE / ツイキャスの自動録画・コメント記録"
 readme = "README.md"
 authors = [
     { name = "fluxrozin", email = "fluxrozin@gmail.com" }

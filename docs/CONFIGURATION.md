@@ -11,10 +11,10 @@
 | `DATABASE_URL` | 設定すると上記より優先。テスト用 |
 | `DATABASE_DIR` | ホスト側の PostgreSQL データディレクトリ |
 | `RECORDINGS_DIR` | ホスト側の録画ディレクトリ。コンテナ内では `/data/recordings` |
-| `CONFIG_DIR` | ホスト側の設定ディレクトリ。コンテナ内では `/data/config` |
+| `CONFIG_DIR` | ホスト側の設定ディレクトリ。コンテナ内では `/data/config`。音声字幕のモデルを置きます |
 | `SESSION_SECRET` | 32文字以上。例示の値では起動しません |
 | `WEB_BIND` / `WEB_PORT` | 公開する待ち受け。コンテナ内部ポートは 8080 |
-| `PUID` / `PGID` | app と worker の UID/GID |
+| `PUID` / `PGID` | app、worker、transcriber の UID/GID。データベースディレクトリには使わない |
 | `DISPLAY_TIMEZONE` | 画面とファイル名の初期タイムゾーン。あとから設定画面でも変更できます |
 | `LOG_LEVEL` | 起動時のログレベル |
 | `COOKIE_SECURE` | HTTPS のとき `true` |
@@ -41,7 +41,9 @@
 - 表示タイムゾーン
 - 再接続回数
 - ツイキャスコメントの取得間隔
-- 完了時の SRT 自動書き出し（既定オフ）
+- 完了時の SRT 自動書き出し（既定オフ）。同じタイミングで、そのセグメントの統合 ASS も更新します
+- 音声字幕の有効、モデル（`large-v3` / `large-v3-turbo`）、言語
+- 配信者ごとの字幕の単語（200文字まで。空ならヒントなし。次の生成から使います）
 
 保存先、ポート、秘密情報、Cookie の Secure は環境変数です。変更後はプロジェクトを再作成または再起動します。
 
