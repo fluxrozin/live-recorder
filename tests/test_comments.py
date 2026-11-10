@@ -90,10 +90,23 @@ def test_srt_uses_segment_offset_and_keeps_overlaps():
             {"nickname": "早", "user_id": "u", "message": "前", "recording_offset_ms": -500},
         ]
     )
-    assert text.index("前 (早)") < text.index("次 (late)") < text.index("こんにちは (名)")
-    assert "1\n00:00:00,000 --> 00:00:05,000\n前 (早)\n" in text
-    assert "2\n00:00:01,000 --> 00:00:06,000\n次 (late)\n" in text
-    assert "3\n00:01:23,450 --> 00:01:28,450\nこんにちは (名)\n" in text
+    assert text.index("前 (早 | @u)") < text.index("次 (@late)") < text.index("こんにちは (名 | @u)")
+    assert "1\n00:00:00,000 --> 00:00:05,000\n前 (早 | @u)\n" in text
+    assert "2\n00:00:01,000 --> 00:00:06,000\n次 (@late)\n" in text
+    assert "3\n00:01:23,450 --> 00:01:28,450\nこんにちは (名 | @u)\n" in text
+
+
+def test_srt_shows_name_and_id_together():
+    text = render_srt(
+        [
+            {"nickname": "みるお", "user_id": "miruo841397", "message": "やっほー", "recording_offset_ms": 0},
+            {"nickname": "みるお", "user_id": "", "message": "名前だけ", "recording_offset_ms": 0},
+            {"nickname": "", "user_id": "", "message": "", "recording_offset_ms": 0},
+        ]
+    )
+    assert "やっほー (みるお | @miruo841397)" in text
+    assert "名前だけ (みるお)" in text
+    assert "(unknown)" in text
 
 
 def test_srt_collapses_blank_lines_and_falls_back_to_user_id():
@@ -106,7 +119,7 @@ def test_srt_collapses_blank_lines_and_falls_back_to_user_id():
     assert text == (
         "1\n00:00:00,000 --> 00:00:05,000\n本文 (unknown)\n"
         "\n"
-        "2\n00:00:00,000 --> 00:00:05,000\n一行目\n二行目 (名)\n"
+        "2\n00:00:00,000 --> 00:00:05,000\n一行目\n二行目 (名 | @u)\n"
     )
 
 

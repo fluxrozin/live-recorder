@@ -114,13 +114,19 @@ sealed class TrayContext : ApplicationContext
     readonly System.Windows.Forms.Timer _timer;
     readonly ToolStripMenuItem _start;
     readonly ToolStripMenuItem _stop;
+    readonly ToolStripMenuItem _rebuild;
     readonly ToolStripMenuItem _open;
+    readonly ToolStripMenuItem _exit;
     readonly Icon _iconIdle;
     readonly Icon _iconRecording;
     readonly Icon _iconStopped;
     readonly TrayConfig _config;
     bool _busy;
     bool _polling;
+    bool _upPending;
+    bool _exitRequested;
+    bool _downStarted;
+    bool _autoFailureNoted;
     int _running;
     bool _healthOk;
     bool _recording;
@@ -142,18 +148,21 @@ sealed class TrayContext : ApplicationContext
         _start.Click += delegate { StartStack(); };
         _stop = new ToolStripMenuItem("停止");
         _stop.Click += delegate { StopStack(); };
+        _rebuild = new ToolStripMenuItem("再構築");
+        _rebuild.Click += delegate { RebuildStack(); };
         _open = new ToolStripMenuItem("管理画面を開く");
         _open.Click += delegate { OpenBrowser(); };
-        var exit = new ToolStripMenuItem("トレイを終了");
-        exit.Click += delegate { ExitThread(); };
+        _exit = new ToolStripMenuItem("停止して終了");
+        _exit.Click += delegate { RequestExit(); };
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_start);
         menu.Items.Add(_stop);
+        menu.Items.Add(_rebuild);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_open);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(exit);
+        menu.Items.Add(_exit);
 
         _notify = new NotifyIcon();
         _notify.Icon = _iconStopped;
@@ -166,7 +175,10 @@ sealed class TrayContext : ApplicationContext
         _timer.Tick += OnTick;
         _timer.Start();
         Apply(0, true, "", false, false);
-        RefreshStatus();
+        if (_config != null)
+            RunUserCommand("up -d", 600000, "起動中", "起動に失敗しました", true, true);
+        else
+            RefreshStatus();
     }
 
     protected override void ExitThreadCore()
@@ -207,7 +219,12 @@ sealed class TrayContext : ApplicationContext
 
     void OnTick(object sender, EventArgs e)
     {
-        if (_busy) return;
+        if (_exitRequested || _busy) return;
+        if (_upPending && !_healthOk && _running == 0)
+        {
+            RunUserCommand("up -d", 600000, "起動中", "起動に失敗しました", true, true);
+            return;
+        }
         RefreshStatus();
     }
 
@@ -249,18 +266,109 @@ sealed class TrayContext : ApplicationContext
 
     void StartStack()
     {
-        RunUserCommand("up -d", 600000, "起動中", "起動に失敗しました");
+        RunUserCommand("up -d", 600000, "起動中", "起動に失敗しました", false, true);
     }
 
     void StopStack()
     {
-        RunUserCommand("stop", 90000, "停止しています", "停止に失敗しました");
+        _upPending = false;
+        RunUserCommand("stop", 90000, "停止しています", "停止に失敗しました", false, false);
     }
 
-    void RunUserCommand(string composeArgs, int timeoutMs, string progress, string failTitle)
+    void RebuildStack()
     {
-        if (_busy || _config == null) return;
+        if (_busy || _config == null || _exitRequested) return;
+        if (_recording)
+        {
+            var answer = MessageBox.Show(
+                _gate,
+                "録画中です。再構築すると録画を区切り、コンテナを作り直します。",
+                "Live Recorder",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2,
+                MessageBoxOptions.DefaultDesktopOnly);
+            if (answer != DialogResult.OK) return;
+        }
+        _upPending = false;
+        RunUserCommand("up -d --build", 1800000, "再構築しています", "再構築に失敗しました", false, false);
+    }
+
+    void RequestExit()
+    {
+        if (_exitRequested) return;
+        if (_recording)
+        {
+            var answer = MessageBox.Show(
+                _gate,
+                "録画中です。終了すると録画を区切り、コンテナを止めます。",
+                "Live Recorder",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2,
+                MessageBoxOptions.DefaultDesktopOnly);
+            if (answer != DialogResult.OK) return;
+        }
+        _exitRequested = true;
+        _upPending = false;
+        _tip = "終了しています";
+        ShowIcon();
+        UpdateMenu();
+        if (!_busy) BeginDown();
+    }
+
+    void BeginDown()
+    {
+        if (_downStarted) return;
+        _downStarted = true;
+        _exitRequested = true;
+        _upPending = false;
+        if (_config == null)
+        {
+            ExitThread();
+            return;
+        }
         _busy = true;
+        _tip = "終了しています";
+        ShowIcon();
+        UpdateMenu();
+        var config = _config;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            var result = RunWsl(config, "down", 90000);
+            Post(delegate
+            {
+                if (!result.Ok)
+                {
+                    string detail = string.IsNullOrEmpty(result.Stderr) ? result.Stdout : result.Stderr;
+                    if (string.IsNullOrEmpty(detail)) detail = "タイムアウト";
+                    MessageBox.Show(
+                        _gate,
+                        BoxText(detail),
+                        "終了に失敗しました",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error,
+                        MessageBoxDefaultButton.Button1,
+                        MessageBoxOptions.DefaultDesktopOnly);
+                }
+                ExitThread();
+            });
+        });
+    }
+
+    static string BoxText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        text = text.Replace("\r", "").Trim();
+        if (text.Length > 800) text = text.Substring(0, 800);
+        return text;
+    }
+
+    void RunUserCommand(string composeArgs, int timeoutMs, string progress, string failTitle, bool quiet, bool retryUp)
+    {
+        if (_busy || _config == null || _exitRequested) return;
+        _busy = true;
+        if (retryUp) _upPending = true;
         _lastError = null;
         _tip = progress;
         ShowIcon();
@@ -272,11 +380,26 @@ sealed class TrayContext : ApplicationContext
             Post(delegate
             {
                 _busy = false;
+                if (_exitRequested)
+                {
+                    BeginDown();
+                    return;
+                }
                 if (!result.Ok)
                 {
                     string detail = string.IsNullOrEmpty(result.Stderr) ? result.Stdout : result.Stderr;
                     _lastError = FirstLine(detail);
-                    Balloon(failTitle, detail);
+                    if (!quiet || !_autoFailureNoted)
+                    {
+                        _autoFailureNoted = true;
+                        Balloon(failTitle, detail);
+                    }
+                }
+                else if (retryUp)
+                {
+                    _upPending = false;
+                    _autoFailureNoted = false;
+                    _lastError = null;
                 }
                 RefreshStatus();
             });
@@ -306,6 +429,8 @@ sealed class TrayContext : ApplicationContext
         else if (healthOk)
         {
             _lastError = null;
+            _upPending = false;
+            _autoFailureNoted = false;
             _tip = recording ? "録画中" : "待機中";
         }
         else if (running > 0)
@@ -332,9 +457,12 @@ sealed class TrayContext : ApplicationContext
     void UpdateMenu()
     {
         bool have = _config != null;
-        _start.Enabled = have && !_busy;
-        _stop.Enabled = have && !_busy && (_healthOk || _running > 0);
-        _open.Enabled = have;
+        bool locked = _busy || _exitRequested;
+        _start.Enabled = have && !locked;
+        _stop.Enabled = have && !locked && (_healthOk || _running > 0 || _upPending);
+        _rebuild.Enabled = have && !locked;
+        _open.Enabled = have && !_exitRequested;
+        _exit.Enabled = !_exitRequested;
     }
 
     void Balloon(string title, string text)

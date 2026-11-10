@@ -19,11 +19,22 @@ def _srt_timestamp(ms: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
+def _one_line(value: str) -> str:
+    return " ".join(value.replace("\r", " ").replace("\n", " ").split())
+
+
+def _author(nickname: str, user_id: str) -> str:
+    name = _one_line(nickname)
+    handle = _one_line(user_id)
+    if handle and not handle.startswith("@"):
+        handle = f"@{handle}"
+    if name and handle:
+        return f"{name} | {handle}"
+    return name or handle or "unknown"
+
+
 def _cue_text(row: dict[str, object]) -> str:
-    nickname = str(row.get("nickname") or "").strip()
-    user_id = str(row.get("user_id") or "").strip()
-    author = nickname or user_id or "unknown"
-    author = " ".join(author.replace("\r", " ").replace("\n", " ").split()) or "unknown"
+    author = _author(str(row.get("nickname") or ""), str(row.get("user_id") or ""))
     message = str(row.get("message") or "").replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.strip() for line in _BLANK_LINES.sub("\n", message).split("\n")]
     text = "\n".join(line for line in lines if line)

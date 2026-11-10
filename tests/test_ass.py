@@ -86,14 +86,14 @@ def test_missing_comment_srt_uses_legacy_jsonl(tmp_path: Path):
     video = tmp_path / "live.mp4"
     video.write_bytes(b"not a video")
     video.with_suffix(".jsonl").write_text(
-        '{"nickname":"A","user_id":"","message":"こんにちは","recording_offset_ms":2000}\n',
+        '{"nickname":"みるお","user_id":"@miruo841397","message":"やっほー","recording_offset_ms":2000}\n',
         encoding="utf-8",
     )
     written = refresh_combined_ass(video, play_size=(1080, 1920))
     assert written is not None
     body = written.read_text(encoding="utf-8-sig")
     assert "Dialogue: 1,0:00:02.00,0:00:07.00,Comment," in body
-    assert "こんにちは (A)" in body
+    assert "やっほー (みるお | @miruo841397)" in body
 
 
 def test_refresh_writes_bom_and_removes_empty_file(tmp_path: Path):

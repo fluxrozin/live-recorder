@@ -33,9 +33,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1
 
 `windows\tray\build\LiveRecorderTray.exe` ができます。同じフォルダに `tray.json` を置きます。項目は [windows/tray/tray.example.json](windows/tray/tray.example.json) のとおりで、`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパス、`web_port` は `.env` の `WEB_PORT` です。
 
-「起動」は `docker compose up -d`、「停止」は `docker compose stop` です。停止すると、録画中のセグメントはワーカーが最大 30 秒で区切ります。「トレイを終了」はアイコンだけを消し、コンテナは動いたままです。
+トレイを開くと `docker compose up -d` を実行します。Docker がまだ受け付けないときは、5 秒ごとの確認で起動をやり直します。「起動」は同じコマンドです。「停止」は `docker compose stop` で、トレイは残ります。やり直しは「停止」でやめられます。「再構築」は `docker compose up -d --build` です。失敗しても自動ではやり直しません。待ちは 30 分です。録画中のセグメントは、停止や再構築でコンテナが止まると、ワーカーが最大 30 秒で区切ります。再構築と「停止して終了」は、録画中なら確認してから実行します。「停止して終了」は `docker compose down` が終わってからアイコンを消します。データベースと録画ファイルは残ります。プロセスを強制終了したときは、コンテナは動き続けます。
 
-アイコンは管理画面の favicon と同じ図形です。待機中は青、録画中は赤、停止中は灰色です。録画中かどうかは `/healthz` の `recording` を見ます。赤へ替えるには、そのフィールドを含む app を一度 `docker compose up -d --build` で入れます。
+アイコンは管理画面の favicon と同じ図形です。待機中は青、録画中は赤、停止中は灰色です。録画中かどうかは `/healthz` の `recording` を見ます。赤へ替えるには、「再構築」でそのフィールドを含む app を入れます。
 
 ## テスト
 
