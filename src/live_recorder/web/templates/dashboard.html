@@ -31,11 +31,12 @@
   <span class="c-health-strip__item">警告・エラー（24時間） <strong class="u-num">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</strong></span>
 </section>
 
-<section class="c-metrics" aria-label="主要指標">
+<section class="c-metrics c-metrics--5" aria-label="主要指標">
   {{ ui.metric("監視対象", stats.streamers, "radio-tower", hint="監視中 " ~ monitored ~ " / 登録 " ~ stats.streamers) }}
   {{ ui.metric("現在配信中", stats.live, "radio", hint="監視中のアカウントのみ", state="live" if stats.live else "") }}
   {{ ui.metric("現在録画中", stats.recording, "video", hint="開始中・再接続中を含む", state="active" if stats.recording else "") }}
   {{ ui.metric("コメント収集中", stats.collecting, "message-circle", hint="接続中・再接続中を含む", state="active" if stats.collecting else "") }}
+  {{ ui.metric("字幕生成中", stats.speech_pending + stats.speech_running, "file-text", hint="処理中 " ~ stats.speech_running ~ " / 待機 " ~ stats.speech_pending, state="active" if (stats.speech_pending or stats.speech_running) else "") }}
 </section>
 
 <section class="c-stat-strip" aria-label="補足指標">
@@ -136,7 +137,7 @@
     {% if errors %}
     <section class="c-card" aria-labelledby="errors-title">
       <header class="c-card__header">
-        <h2 class="c-card__title" id="errors-title">{{ ui.icon("triangle-alert") }}直近の警告・エラー <span class="c-count c-count--warning">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</span></h2>
+        <h2 class="c-card__title" id="errors-title">{{ ui.icon("triangle-alert") }}直近24時間の警告・エラー <span class="c-count c-count--warning">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</span></h2>
         <div class="c-card__actions"><a class="c-btn c-btn--ghost c-btn--sm" href="/system#events">履歴{{ ui.icon("chevron-right", "sm") }}</a></div>
       </header>
       <ul class="c-event-list">

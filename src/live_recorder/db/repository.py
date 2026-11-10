@@ -726,6 +726,19 @@ class Repository:
             )
             or 0
         )
+        speech = {"pending": 0, "running": 0}
+        speech_rows = await self.session.execute(
+            select(RecordingSegment.speech_status, func.count())
+            .where(
+                RecordingSegment.file_removed.is_(False),
+                RecordingSegment.finished_at.is_not(None),
+                RecordingSegment.speech_status.in_(("pending", "running")),
+            )
+            .group_by(RecordingSegment.speech_status)
+        )
+        for status, count in speech_rows:
+            if status in speech:
+                speech[status] = int(count)
         sessions_today = int(
             await self.session.scalar(
                 select(func.count()).select_from(StreamSession).where(StreamSession.detected_at >= day_start)
@@ -747,6 +760,8 @@ class Repository:
             "live": live,
             "recording": recording,
             "collecting": collecting,
+            "speech_pending": speech["pending"],
+            "speech_running": speech["running"],
             "sessions_today": sessions_today,
             "comments_today": comments_today,
             "total_bytes": total_bytes,

@@ -553,9 +553,20 @@ def test_live_pages_refresh_without_settings_or_login():
     assert "ファイル照合" in system
 
 
+def test_dashboard_metrics_include_speech_in_progress():
+    html = render_page("dashboard.html", "normal")
+    assert 'class="c-metrics c-metrics--5"' in html
+    assert "字幕生成中" in html
+    assert "処理中 1 / 待機 3" in html
+    assert 'class="c-metric is-active"' in html
+    empty = render_page("dashboard.html", "empty")
+    assert "処理中 0 / 待機 0" in empty
+    assert empty.count('class="c-metric is-active"') == 0
+
+
 def test_dashboard_errors_only_when_present():
-    assert "直近の警告・エラー" not in render_page("dashboard.html", "normal")
-    assert "直近の警告・エラー" in render_page("dashboard.html", "stress")
+    assert "直近24時間の警告・エラー" not in render_page("dashboard.html", "normal")
+    assert "直近24時間の警告・エラー" in render_page("dashboard.html", "stress")
 
 
 def test_flash_renders_as_toast_and_inline_alert():

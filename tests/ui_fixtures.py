@@ -137,6 +137,8 @@ def dashboard_context(scenario: str) -> dict:
         "live": 0 if empty else 2,
         "recording": 0 if empty else 2,
         "collecting": 0 if empty else 1,
+        "speech_pending": 0 if empty else 3,
+        "speech_running": 0 if empty else 1,
         "sessions_today": 0 if empty else 5,
         "comments_today": 0 if empty else 12840,
         "total_bytes": 0 if empty else 2 * 1024**4,
