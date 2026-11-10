@@ -85,6 +85,8 @@ services:
   worker:
     image: live-recorder:local
     restart: unless-stopped
+    # ワーカーは SIGTERM のあと最大 20 秒で録画を止める。既定の 10 秒だとその前に SIGKILL される。
+    stop_grace_period: 30s
     user: "${PUID:-1000}:${PGID:-1000}"
     depends_on:
       db:
