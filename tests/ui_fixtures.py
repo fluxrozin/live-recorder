@@ -246,6 +246,7 @@ def recordings_context(scenario: str, query: str = "") -> dict:
     now = utcnow()
     count = {"empty": 0, "normal": 6, "stress": 20}[scenario]
     statuses = ["RECORDING", "COMPLETED", "PARTIAL", "FAILED", "CANCELLED", "NONE"]
+    speech = [None, "running", "pending", "failed", "completed", None]
     cards = [
         {
             "id": 200 + i,
@@ -258,7 +259,9 @@ def recordings_context(scenario: str, query: str = "") -> dict:
             "files": i % 3,
             "size": (i + 1) * 3 * 1024**3,
             "comments": i * 1234,
+            "speech_cues": i * 3,
             "status": statuses[i % len(statuses)],
+            "speech_status": speech[i % len(speech)],
         }
         for i in range(count)
     ]

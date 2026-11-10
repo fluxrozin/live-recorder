@@ -78,12 +78,34 @@ _SPEECH = {
     "skipped": ("neutral", "minus"),
     "NONE": ("neutral", "minus"),
 }
+_SPEECH_SUMMARY = {
+    "running": ("info", "loader-circle", "字幕生成中"),
+    "pending": ("info", "clock", "字幕待機"),
+    "failed": ("danger", "circle-x", "字幕失敗"),
+    "completed": ("success", "circle-check", "字幕完了"),
+}
 _VALIDATION = {
     "ok": ("success", "circle-check", "検証済み"),
     "pending": ("info", "clock", "検証待ち"),
     "partial": ("warning", "triangle-alert", "一部有効"),
     "invalid": ("danger", "circle-x", "破損の可能性"),
 }
+
+
+def speech_summary(statuses: list[str | None]) -> str | None:
+    """録画1件の字幕状態。生成中、待機、失敗、完了の順で一つにまとめる。"""
+    active = [status for status in statuses if status not in {None, "skipped"}]
+    if not active:
+        return None
+    if "running" in active:
+        return "running"
+    if "pending" in active or None in statuses:
+        return "pending"
+    if "failed" in active:
+        return "failed"
+    if "completed" in active:
+        return "completed"
+    return None
 
 
 def status_info(kind: str, code: object) -> dict[str, object]:
@@ -115,6 +137,9 @@ def status_info(kind: str, code: object) -> dict[str, object]:
         if key in _SPEECH:
             tone, icon = _SPEECH[key]
             label = SPEECH_STATUS_JA.get(key, key)
+    elif kind == "speech_summary":
+        if raw in _SPEECH_SUMMARY:
+            tone, icon, label = _SPEECH_SUMMARY[raw]
     elif kind == "validation":
         tone, icon, label = _VALIDATION.get(raw, (tone, icon, label))
     return {"tone": tone, "icon": icon, "label": label, "code": raw, "pulse": icon == "dot"}

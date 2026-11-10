@@ -496,7 +496,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "files": len(visible),
                         "size": sum(segment.file_size or 0 for segment in visible),
                         "comments": await repo.comment_count(item.id),
+                        "speech_cues": _speech_cue_count(request.app.state.settings.recordings_dir, segments),
                         "status": job.status if job else "NONE",
+                        "speech_status": ui_helpers.speech_summary(
+                            [segment.speech_status for segment in segments if not segment.file_removed]
+                        ),
                     }
                 )
             people = [{"id": person.id, "name": person.display_name, "platform": person.platform} for person in streamers]

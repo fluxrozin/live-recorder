@@ -85,8 +85,9 @@
           <th scope="col" class="is-num u-hide-lg">録画時間</th>
           <th scope="col" class="is-num">サイズ</th>
           <th scope="col" class="is-num u-hide-lg">コメント</th>
+          <th scope="col" class="is-num u-hide-lg">字幕</th>
           <th scope="col">状態</th>
-          <th scope="col" class="is-actions u-hide-sm"><span class="u-sr-only">詳細</span></th>
+          <th scope="col" class="is-actions"><span class="u-sr-only">録画詳細</span></th>
         </tr>
       </thead>
       <tbody>
@@ -117,8 +118,16 @@
           <td class="is-num u-hide-lg" data-label="コメント">
             {% if card.comments %}<a href="/comments?session_id={{ card.id }}" aria-label="コメント {{ card.comments }} 件を表示">{{ "{:,}".format(card.comments) }}</a>{% else %}<span class="u-subtle">0</span>{% endif %}
           </td>
-          <td class="is-corner">{{ ui.status("rec", card.status) }}</td>
-          <td class="is-actions u-hide-sm"><a class="c-icon-btn c-icon-btn--sm" href="/recordings/{{ card.id }}" aria-label="{{ card.name }} の録画詳細">{{ ui.icon("chevron-right") }}</a></td>
+          <td class="is-num u-hide-lg" data-label="字幕">
+            {% if card.speech_cues %}<a href="/speech/cues?session_id={{ card.id }}" aria-label="字幕 {{ card.speech_cues }} 件を表示">{{ "{:,}".format(card.speech_cues) }}</a>{% else %}<span class="u-subtle">0</span>{% endif %}
+          </td>
+          <td class="is-corner">
+            <div class="c-state-stack">
+              {{ ui.status("rec", card.status) }}
+              {% if card.speech_status %}{{ ui.status("speech_summary", card.speech_status) }}{% endif %}
+            </div>
+          </td>
+          <td class="is-actions is-span"><a class="c-btn c-btn--sm" href="/recordings/{{ card.id }}">{{ ui.icon("file-video", "sm") }}録画詳細</a></td>
         </tr>
         {% endfor %}
       </tbody>

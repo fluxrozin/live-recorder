@@ -280,6 +280,11 @@ def test_recording_pagination_keeps_filters():
     for link in paging:
         assert "streamer_id=1" in link and "status=FAILED" in link
     assert re.search(r'value="FAILED"[^>]*selected', html)
+    assert "#i-file-video" in html and "録画詳細</a>" in html
+    assert "字幕生成中" in html and "字幕待機" in html
+    assert "字幕失敗" in html and "字幕完了" in html
+    assert 'href="/speech/cues?session_id=201"' in html
+    assert 'aria-label="字幕 3 件を表示"' in html
 
 
 def test_segment_download_only_when_file_exists():
@@ -536,6 +541,17 @@ def test_flash_renders_as_toast_and_inline_alert():
     assert html.count("削除できません") == 2
     context["flash"] = {"message": "保存しました", "tone": "success"}
     assert render("dashboard.html", context).count("保存しました") == 1
+
+
+def test_speech_summary_prefers_work_in_progress():
+    assert ui.speech_summary([]) is None
+    assert ui.speech_summary([None, "skipped"]) is None
+    assert ui.speech_summary(["skipped"]) is None
+    assert ui.speech_summary(["completed", "skipped"]) == "completed"
+    assert ui.speech_summary(["completed", "failed"]) == "failed"
+    assert ui.speech_summary(["failed", "pending"]) == "pending"
+    assert ui.speech_summary(["completed", None]) == "pending"
+    assert ui.speech_summary(["pending", "running"]) == "running"
 
 
 def test_short_time_includes_the_date_on_the_same_day():

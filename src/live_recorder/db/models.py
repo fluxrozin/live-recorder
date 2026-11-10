@@ -89,9 +89,15 @@ class StreamSession(Base):
     )
 
     streamer: Mapped[Streamer] = relationship(back_populates="sessions")
-    recording_jobs: Mapped[list[RecordingJob]] = relationship(back_populates="session")
-    comment_jobs: Mapped[list[CommentCollectionJob]] = relationship(back_populates="session")
-    comments: Mapped[list[Comment]] = relationship(back_populates="session")
+    recording_jobs: Mapped[list[RecordingJob]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    comment_jobs: Mapped[list[CommentCollectionJob]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    comments: Mapped[list[Comment]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class RecordingJob(Base):
@@ -114,7 +120,9 @@ class RecordingJob(Base):
     )
 
     session: Mapped[StreamSession] = relationship(back_populates="recording_jobs")
-    segments: Mapped[list[RecordingSegment]] = relationship(back_populates="job")
+    segments: Mapped[list[RecordingSegment]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class RecordingSegment(Base):

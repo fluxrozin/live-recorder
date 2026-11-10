@@ -189,6 +189,20 @@ def test_pages_render_with_real_data(client):
     assert client.get("/comments/export?format=jsonl").status_code == 400
 
 
+def test_recording_history_delete_keeps_database_constraints(client):
+    token = _login(client)
+    session_id = client.ids["session"]
+    removed = client.post(
+        f"/recordings/{session_id}/delete",
+        data={"csrf": token, "confirm": "yes"},
+        follow_redirects=False,
+    )
+    assert removed.status_code == 303
+    assert removed.headers["location"] == "/recordings"
+    assert client.get(f"/recordings/{session_id}").status_code == 404
+    assert "テスト配信" not in client.get("/recordings").text
+
+
 def test_streamer_lifecycle(client):
     token = _login(client)
     bad = client.post(
