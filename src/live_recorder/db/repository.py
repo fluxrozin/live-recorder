@@ -41,6 +41,15 @@ class RepositoryError(ValueError):
     pass
 
 
+def assign_sort_order(streamers: list[Streamer], ordered_ids: list[int]) -> None:
+    """配信者の表示順を ordered_ids にする。現在の配信者と過不足や重複があれば拒否する。"""
+    if len(ordered_ids) != len(set(ordered_ids)) or {item.id for item in streamers} != set(ordered_ids):
+        raise RepositoryError("並び順が現在の配信者と一致しません")
+    by_id = {item.id: item for item in streamers}
+    for index, streamer_id in enumerate(ordered_ids):
+        by_id[streamer_id].sort_order = index
+
+
 class Repository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -60,9 +69,18 @@ class Repository:
         await self.session.flush()
         return user
 
-    async def list_streamers(self) -> list[Streamer]:
-        result = await self.session.scalars(select(Streamer).order_by(Streamer.platform, Streamer.display_name))
+    async def list_streamers(self, *, custom: bool = False) -> list[Streamer]:
+        ordering = (
+            (Streamer.sort_order, Streamer.id)
+            if custom
+            else (Streamer.platform, Streamer.display_name, Streamer.id)
+        )
+        result = await self.session.scalars(select(Streamer).order_by(*ordering))
         return list(result)
+
+    async def next_sort_order(self) -> int:
+        current = await self.session.scalar(select(func.max(Streamer.sort_order)))
+        return 0 if current is None else int(current) + 1
 
     async def monitored_streamers(self) -> list[Streamer]:
         result = await self.session.scalars(

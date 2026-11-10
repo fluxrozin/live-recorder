@@ -404,6 +404,7 @@
 
   /* 入力中・確認ダイアログ・操作メニューを、定期更新で消さない */
   function interactionBlocked(elt) {
+    if (doc.documentElement.hasAttribute("data-order-pending")) return true;
     if (doc.querySelector("dialog[open]")) return true;
     if (openMenuState) return true;
     if (sidebar && sidebar.classList.contains("is-open")) return true;
@@ -799,6 +800,380 @@
     var next = link.getAttribute(on ? "data-recording" : "data-idle");
     if (next && link.getAttribute("href") !== next) link.setAttribute("href", next);
   }
+
+  /* ===== Streamer reorder ===== */
+  var reorderDrag = null;
+
+  function reorderRows(body) {
+    return $all("tr", body);
+  }
+
+  function reorderFiltered() {
+    var filter = doc.getElementById("streamer-filter");
+    return !!(filter && filter.value.trim());
+  }
+
+  function reorderIds(body) {
+    return reorderRows(body).map(function (row) {
+      return row.id.replace("streamer-", "");
+    });
+  }
+
+  function dropPlace(body, y, ignore) {
+    var rows = reorderRows(body).filter(function (row) {
+      return row !== ignore && !row.hidden;
+    });
+    if (!rows.length) return null;
+    for (var i = 0; i < rows.length; i++) {
+      var rect = rows[i].getBoundingClientRect();
+      var top = rect.top - rowShift(rows[i]);
+      if (y < top + rect.height / 2) return { row: rows[i], before: true };
+    }
+    return { row: rows[rows.length - 1], before: false };
+  }
+
+  function moveRow(row, place) {
+    if (!place) return;
+    if (place.before) {
+      if (place.row.previousElementSibling !== row) place.row.before(row);
+    } else if (place.row.nextElementSibling !== row) {
+      place.row.after(row);
+    }
+  }
+
+  function rowShift(row) {
+    var value = window.getComputedStyle(row).transform;
+    if (!value || value === "none") return 0;
+    return new DOMMatrixReadOnly(value).m42;
+  }
+
+  /* 入れ替え前後の見た目の位置を繋ぎ、行が隙間へ滑るようにする */
+  function shiftRows(body, move) {
+    var rows = reorderRows(body);
+    var from = rows.map(function (row) {
+      return row.offsetTop + rowShift(row);
+    });
+    move();
+    var moved = [];
+    rows.forEach(function (row, index) {
+      var dy = from[index] - row.offsetTop;
+      if (Math.abs(dy) < 0.5) {
+        row.style.transform = "";
+        row.style.transition = "";
+        return;
+      }
+      row.style.transition = "none";
+      row.style.transform = "translateY(" + dy + "px)";
+      moved.push(row);
+    });
+    if (moved[0]) moved[0].getBoundingClientRect();
+    moved.forEach(function (row) {
+      row.style.transition = "";
+      row.style.transform = "";
+    });
+  }
+
+  function clearRowMotion(body) {
+    reorderRows(body).forEach(function (row) {
+      row.style.transform = "";
+      row.style.transition = "";
+    });
+  }
+
+  function liftRow(state, event) {
+    var row = state.row;
+    var rect = row.getBoundingClientRect();
+    var source = row.closest("table");
+    var floatTable = doc.createElement("table");
+    var clone = row.cloneNode(true);
+    var body = doc.createElement("tbody");
+    floatTable.className = source.className + " c-row-float";
+    floatTable.setAttribute("aria-hidden", "true");
+    floatTable.inert = true;
+    clone.removeAttribute("id");
+    clone.querySelectorAll("[id]").forEach(function (node) {
+      node.removeAttribute("id");
+    });
+    body.appendChild(clone);
+    floatTable.appendChild(body);
+    doc.body.appendChild(floatTable);
+    floatTable.style.width = rect.width + "px";
+    if (window.getComputedStyle(row).display === "table-row") {
+      floatTable.style.tableLayout = "fixed";
+      Array.prototype.forEach.call(row.children, function (cell, index) {
+        var copy = clone.children[index];
+        var width = cell.getBoundingClientRect().width;
+        copy.style.width = width + "px";
+        copy.style.maxWidth = "none";
+      });
+    }
+    state.float = floatTable;
+    state.offsetX = event.clientX - rect.left;
+    state.offsetY = event.clientY - rect.top;
+    placeFloat(state, event.clientX, event.clientY, false);
+    row.classList.add("is-placeholder");
+    doc.body.classList.add("is-reordering");
+  }
+
+  function placeFloat(state, x, y, animate) {
+    var left = x - state.offsetX;
+    var top = y - state.offsetY;
+    var lift = animate ? "" : " scale(1.015)";
+    state.float.style.transition = animate ? "transform var(--dur-base) var(--ease-out)" : "none";
+    if (animate) state.float.getBoundingClientRect();
+    state.float.style.transform = "translate3d(" + left + "px," + top + "px,0)" + lift;
+  }
+
+  function layoutPoint(row) {
+    var rect = row.getBoundingClientRect();
+    return { left: rect.left, top: rect.top - rowShift(row) };
+  }
+
+  function settleFloat(state, done) {
+    var floatTable = state.float;
+    if (!floatTable) {
+      done();
+      return;
+    }
+    var dest = layoutPoint(state.row);
+    var finished = false;
+    function finish(event) {
+      if (finished) return;
+      if (event && event.target !== floatTable) return;
+      finished = true;
+      floatTable.remove();
+      state.float = null;
+      done();
+    }
+    placeFloat(state, dest.left + state.offsetX, dest.top + state.offsetY, true);
+    floatTable.addEventListener("transitionend", finish);
+    window.setTimeout(finish, 280);
+  }
+
+  function visibleSibling(row, direction) {
+    var node = row;
+    while (node) {
+      node = direction < 0 ? node.previousElementSibling : node.nextElementSibling;
+      if (node && node.tagName === "TR" && !node.hidden) return node;
+    }
+    return null;
+  }
+
+  function announceReorder(row) {
+    var status = doc.getElementById("reorder-status");
+    var name = row.querySelector(".c-streamer__name");
+    if (status && name) status.textContent = name.textContent.trim() + "の位置を変更しました";
+  }
+
+  var reorderRequest = 0;
+  var reorderSettling = false;
+
+  function saveReorder(body) {
+    var requestId = ++reorderRequest;
+    doc.documentElement.setAttribute("data-order-pending", "");
+    var token = (doc.querySelector('meta[name="csrf-token"]') || {}).content || "";
+    var bodyText = reorderIds(body)
+      .map(function (id) {
+        return "id=" + encodeURIComponent(id);
+      })
+      .join("&");
+    fetch("/streamers/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": token },
+      body: bodyText,
+    })
+      .then(function (response) {
+        if (requestId !== reorderRequest) return;
+        doc.documentElement.removeAttribute("data-order-pending");
+        if (response.ok) return;
+        var stale = response.status === 409;
+        toast(
+          stale
+            ? "一覧が変わっていたため、並び順を保存できませんでした"
+            : "並び順を保存できませんでした",
+          "danger"
+        );
+        var poll = doc.getElementById("streamers-poll");
+        if (poll && window.htmx) window.htmx.trigger(poll, "lr:refresh");
+      })
+      .catch(function () {
+        if (requestId !== reorderRequest) return;
+        doc.documentElement.removeAttribute("data-order-pending");
+        toast("並び順を保存できませんでした。ネットワークを確認してください", "danger");
+      });
+  }
+
+  function endReorderDrag(commit) {
+    var state = reorderDrag;
+    if (!state) return;
+    reorderDrag = null;
+    if (state.loop) cancelAnimationFrame(state.loop);
+    releaseReorderPointer(state.pointerId);
+    doc.body.classList.remove("is-reordering");
+    if (!state.active) {
+      doc.documentElement.removeAttribute("data-order-pending");
+      return;
+    }
+    var changed = reorderRows(state.body).some(function (row, index) {
+      return row !== state.origin[index];
+    });
+    var keep = commit && changed;
+    reorderSettling = true;
+    if (!keep && changed) {
+      shiftRows(state.body, function () {
+        state.origin.forEach(function (row) {
+          state.body.appendChild(row);
+        });
+      });
+    }
+    settleFloat(state, function () {
+      clearRowMotion(state.body);
+      state.row.classList.remove("is-placeholder");
+      reorderSettling = false;
+      if (keep) {
+        announceReorder(state.row);
+        saveReorder(state.body);
+        return;
+      }
+      doc.documentElement.removeAttribute("data-order-pending");
+    });
+  }
+
+  function dragFrame(state) {
+    var edge = state.y < 72 ? -14 : state.y > window.innerHeight - 72 ? 14 : 0;
+    if (edge) window.scrollBy(0, edge);
+    if (!edge && state.y === state.placedY) return;
+    state.placedY = state.y;
+    var place = dropPlace(state.body, state.y, state.row);
+    if (state.place && place && state.place.row === place.row && state.place.before === place.before) return;
+    state.place = place;
+    shiftRows(state.body, function () {
+      moveRow(state.row, place);
+    });
+  }
+
+  function ensureDragLoop(state) {
+    if (state.loop) return;
+    function tick() {
+      if (reorderDrag !== state) {
+        state.loop = 0;
+        return;
+      }
+      dragFrame(state);
+      state.loop = window.requestAnimationFrame(tick);
+    }
+    state.loop = window.requestAnimationFrame(tick);
+  }
+
+  doc.addEventListener("pointerdown", function (event) {
+    if (reorderDrag || reorderSettling) return;
+    var handle = event.target.closest && event.target.closest("[data-reorder-handle]");
+    if (!handle || event.button !== 0) return;
+    var row = handle.closest("tr");
+    var body = row && row.parentElement;
+    if (!row || !body || body.id !== "streamer-rows") return;
+    if (reorderFiltered()) {
+      toast("絞り込みを解除すると並べ替えできます", "warning");
+      return;
+    }
+    event.preventDefault();
+    doc.documentElement.setAttribute("data-order-pending", "");
+    reorderDrag = {
+      pointerId: event.pointerId,
+      row: row,
+      body: body,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+      origin: reorderRows(body),
+    };
+    captureReorderPointer(event);
+  });
+
+  /* 持ち手は行と一緒に動く。そこへ捕捉すると、1行動かした瞬間に捕捉が外れてドラッグが終わる。 */
+  function captureReorderPointer(event) {
+    if (captureReorderPointer.busy) return;
+    captureReorderPointer.busy = true;
+    try {
+      doc.documentElement.setPointerCapture(event.pointerId);
+    } catch (err) {
+      /* 合成イベントや未対応ブラウザでは捕捉できない */
+    }
+    captureReorderPointer.busy = false;
+  }
+
+  function releaseReorderPointer(pointerId) {
+    try {
+      if (doc.documentElement.hasPointerCapture(pointerId)) {
+        doc.documentElement.releasePointerCapture(pointerId);
+      }
+    } catch (err) {
+      /* すでに解放されている */
+    }
+  }
+
+  doc.addEventListener(
+    "pointermove",
+    function (event) {
+      if (!reorderDrag || event.pointerId !== reorderDrag.pointerId) return;
+      var dx = event.clientX - reorderDrag.startX;
+      var dy = event.clientY - reorderDrag.startY;
+      if (!reorderDrag.active) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        reorderDrag.active = true;
+        liftRow(reorderDrag, event);
+      }
+      event.preventDefault();
+      reorderDrag.x = event.clientX;
+      reorderDrag.y = event.clientY;
+      placeFloat(reorderDrag, event.clientX, event.clientY, false);
+      captureReorderPointer(event);
+      ensureDragLoop(reorderDrag);
+    },
+    { passive: false }
+  );
+
+  doc.addEventListener("pointerup", function (event) {
+    if (!reorderDrag || event.pointerId !== reorderDrag.pointerId) return;
+    endReorderDrag(true);
+  });
+  doc.addEventListener("pointercancel", function (event) {
+    if (!reorderDrag || event.pointerId !== reorderDrag.pointerId) return;
+    endReorderDrag(false);
+  });
+  doc.addEventListener("lostpointercapture", function (event) {
+    if (!reorderDrag || event.pointerId !== reorderDrag.pointerId) return;
+    if (event.buttons & 1) captureReorderPointer(event);
+  });
+
+  doc.addEventListener("keydown", function (event) {
+    if (reorderDrag && event.key === "Escape") {
+      event.preventDefault();
+      endReorderDrag(false);
+      return;
+    }
+    if (reorderSettling) return;
+    var handle = event.target.closest && event.target.closest("[data-reorder-handle]");
+    if (!handle) return;
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    var row = handle.closest("tr");
+    var body = row && row.parentElement;
+    if (!row || !body || body.id !== "streamer-rows") return;
+    if (reorderFiltered()) {
+      event.preventDefault();
+      toast("絞り込みを解除すると並べ替えできます", "warning");
+      return;
+    }
+    var sibling = visibleSibling(row, event.key === "ArrowUp" ? -1 : 1);
+    if (!sibling) return;
+    event.preventDefault();
+    shiftRows(body, function () {
+      if (event.key === "ArrowUp") sibling.before(row);
+      else sibling.after(row);
+    });
+    announceReorder(row);
+    saveReorder(body);
+  });
 
   /* ===== Init ===== */
   function init() {

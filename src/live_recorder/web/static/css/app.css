@@ -1363,6 +1363,28 @@ textarea.c-input {
 
 /* ===== Streamers ===== */
 .c-streamer { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.c-grip { flex: none; cursor: grab; touch-action: none; color: var(--text-tertiary); }
+.c-grip:hover { color: var(--text); }
+body.is-reordering { cursor: grabbing; user-select: none; touch-action: none; }
+body.is-reordering .c-grip { cursor: grabbing; }
+.c-streamers-table tbody tr { transition: background var(--dur-fast), transform var(--dur-base) var(--ease-out); }
+tr.is-placeholder,
+body.is-reordering tr.is-placeholder:hover { background: var(--accent-subtle); }
+tr.is-placeholder > td { opacity: 0; }
+.c-row-float {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: calc(var(--z-drawer) + 10);
+  margin: 0;
+  pointer-events: none;
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  outline: 1px solid var(--accent-border);
+  overflow: hidden;
+}
+.c-row-float tr { background: var(--surface); }
 .c-streamer__avatar {
   display: grid;
   place-items: center;

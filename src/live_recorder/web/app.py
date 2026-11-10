@@ -27,7 +27,7 @@ from live_recorder.comments.segments import (
 )
 from live_recorder.config import Settings, load_settings
 from live_recorder.db.models import Streamer, StreamSession
-from live_recorder.db.repository import Repository, RepositoryError
+from live_recorder.db.repository import Repository, RepositoryError, assign_sort_order
 from live_recorder.db.runtime import (
     SettingsValidationError,
     ensure_runtime,
@@ -338,7 +338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if blocked:
             return blocked
         rows = await _streamer_rows(request)
-        return await render(request, "streamers.html", rows=rows, error="")
+        return await render(request, "streamers.html", rows=rows, error="", order=_streamer_order(request))
 
     @app.post("/streamers")
     async def streamers_create(request: Request):
@@ -353,7 +353,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except NormalizeError as exc:
             rows = await _streamer_rows(request)
             return await render(
-                request, "streamers.html", rows=rows, error=str(exc), add_form=submitted, status_code=400
+                request,
+                "streamers.html",
+                rows=rows,
+                error=str(exc),
+                add_form=submitted,
+                order=_streamer_order(request),
+                status_code=400,
             )
         async with request.app.state.db.session() as session:
             repo = Repository(session)
@@ -365,6 +371,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     rows=rows,
                     error="同じ配信者は登録済みです",
                     add_form=submitted,
+                    order=_streamer_order(request),
                     status_code=400,
                 )
             streamer = Streamer(
@@ -375,6 +382,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 monitoring_enabled=_checked(form, "monitoring_enabled"),
                 recording_enabled=_checked(form, "recording_enabled"),
                 comments_enabled=_checked(form, "comments_enabled"),
+                sort_order=await repo.next_sort_order(),
                 live_status="OFFLINE",
             )
             await repo.add_streamer(streamer)
@@ -382,6 +390,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await session.commit()
         flash(request, "配信者を追加しました")
         return RedirectResponse("/streamers", status_code=303)
+
+    @app.post("/streamers/order")
+    async def streamers_order(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        form = dict(await request.form())
+        check_csrf(request, form)
+        mode = str(form.get("order") or "")
+        if mode not in {"default", "custom"}:
+            raise HTTPException(status_code=400, detail="並び順が不正です")
+        request.session["streamer_order"] = mode
+        if request.headers.get("hx-request"):
+            rows = await _streamer_rows(request)
+            return await render(request, "streamers.html", rows=rows, error="", order=mode)
+        return RedirectResponse("/streamers", status_code=303)
+
+    @app.post("/streamers/reorder")
+    async def streamers_reorder(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        form = await request.form()
+        check_csrf(request, dict(form))
+        try:
+            ordered = [int(item) for item in form.getlist("id")]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="並び順が不正です") from None
+        async with request.app.state.db.session() as session:
+            repo = Repository(session)
+            streamers = await repo.list_streamers()
+            try:
+                assign_sort_order(streamers, ordered)
+            except RepositoryError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            await session.commit()
+        return Response(status_code=204)
 
     @app.get("/streamers/{streamer_id}/edit", response_class=HTMLResponse)
     async def streamer_edit(request: Request, streamer_id: int):
@@ -463,7 +508,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await session.commit()
             row = await _one_streamer_row(session, streamer)
         if request.headers.get("hx-request"):
-            return await render(request, "streamer_row.html", row=row)
+            return await render(request, "streamer_row.html", row=row, order=_streamer_order(request))
         return RedirectResponse("/streamers", status_code=303)
 
     @app.post("/streamers/{streamer_id}/delete")
@@ -1264,11 +1309,15 @@ async def _one_streamer_row(session, streamer: Streamer) -> dict:
     return row
 
 
+def _streamer_order(request: Request) -> str:
+    return "custom" if request.session.get("streamer_order") == "custom" else "default"
+
+
 async def _streamer_rows(request: Request) -> list[dict]:
     async with request.app.state.db.session() as session:
         repo = Repository(session)
         rows = []
-        for streamer in await repo.list_streamers():
+        for streamer in await repo.list_streamers(custom=_streamer_order(request) == "custom"):
             rows.append(await _one_streamer_row(session, streamer))
         return rows
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,7 +79,24 @@ async def streamers(request: Request):
             "recording_enabled": False,
             "comments_enabled": True,
         }
+    context["order"] = "custom" if request.query_params.get("order") == "custom" else "default"
+    if context["order"] == "default":
+        context["rows"] = sorted(
+            context["rows"], key=lambda row: (row["platform"], row["display_name"], row["id"])
+        )
     return _render(request, "streamers.html", context)
+
+
+@app.post("/streamers/order")
+async def streamer_order(request: Request):
+    form = await request.form()
+    mode = "custom" if str(form.get("order") or "") == "custom" else "default"
+    return RedirectResponse(f"/streamers?order={mode}", status_code=303)
+
+
+@app.post("/streamers/reorder")
+async def reorder():
+    return Response(status_code=204)
 
 
 @app.post("/streamers/{streamer_id}/toggle", response_class=HTMLResponse)
@@ -90,7 +107,9 @@ async def toggle(request: Request, streamer_id: int):
     row = next(item for item in fixtures.streamer_rows("stress") if item["id"] == streamer_id)
     field = str(form.get("field"))
     row[field] = not row[field]
-    return _render(request, "streamer_row.html", fixtures.base_context(row=row))
+    referer = request.headers.get("referer") or ""
+    order = "custom" if "order=custom" in referer else "default"
+    return _render(request, "streamer_row.html", fixtures.base_context(row=row, order=order))
 
 
 @app.get("/streamers/{streamer_id}/edit", response_class=HTMLResponse)

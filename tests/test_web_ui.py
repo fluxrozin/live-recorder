@@ -150,8 +150,38 @@ def test_toggle_forms_keep_htmx_contract():
         assert button["role"] == "switch"
         assert button["aria-checked"] in {"true", "false"}
         assert button.get("aria-label")
+    page = render_page("streamers.html", "normal")
+    assert "監視を停止すると" not in page
+    assert "スイッチは即時に保存されます。" in page
+    assert "data-reorder-handle" not in page
+    assert 'id="reorder-status"' in page
     assert fields == {"monitoring_enabled", "recording_enabled", "comments_enabled"}
     assert html.lstrip().startswith('<tr id="streamer-1"')
+    poll = re.search(r'<div id="streamers-poll"[^>]*>', page)
+    assert poll is not None
+    assert 'hx-select="#streamers-live"' in poll.group(0)
+    assert 'hx-disinherit="hx-select hx-select-oob"' in poll.group(0)
+    for form in parse(page).forms:
+        if "/toggle" not in form["attrs"].get("hx-post", ""):
+            continue
+        assert "hx-select" not in form["attrs"]
+        assert "hx-select-oob" not in form["attrs"]
+
+
+def test_streamer_order_toggle_shows_handles_only_for_custom():
+    page = render_page("streamers.html", "normal")
+    form = next(item for item in parse(page).forms if item["attrs"].get("action") == "/streamers/order")
+    assert form["attrs"]["hx-select"] == "#streamers-live"
+    assert form["attrs"]["hx-target"] == "#streamers-live"
+    pressed = {button["value"]: button["aria-pressed"] for button in form["buttons"]}
+    assert pressed == {"default": "true", "custom": "false"}
+    assert "data-reorder-handle" not in page
+    custom = render("streamers.html", fx.streamers_context("normal", order="custom"))
+    assert custom.count("data-reorder-handle") == len(fx.streamer_rows("normal"))
+    assert "i-grip-vertical" in custom
+    custom_form = next(item for item in parse(custom).forms if item["attrs"].get("action") == "/streamers/order")
+    custom_pressed = {button["value"]: button["aria-pressed"] for button in custom_form["buttons"]}
+    assert custom_pressed["custom"] == "true" and custom_pressed["default"] == "false"
 
 
 def test_toggle_reflects_state():
@@ -665,6 +695,8 @@ def test_existing_routes_are_kept(tmp_path):
         ("POST", "/streamers"),
         ("GET", "/streamers/{streamer_id}/edit"),
         ("POST", "/streamers/{streamer_id}/edit"),
+        ("POST", "/streamers/order"),
+        ("POST", "/streamers/reorder"),
         ("POST", "/streamers/{streamer_id}/speech-words"),
         ("POST", "/streamers/{streamer_id}/toggle"),
         ("POST", "/streamers/{streamer_id}/delete"),

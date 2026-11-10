@@ -1,8 +1,12 @@
 {% import "components/ui.html" as ui with context %}
+{% set order = order|default('default') %}
 {%- set live_code = streamer_live_code(row) -%}
 <tr id="streamer-{{ row.id }}" data-search="{{ row.display_name }} {{ row.user_id }} {{ row.platform|platform_label }}"{% if not row.monitoring_enabled %} class="is-muted"{% endif %}>
   <td class="is-who is-fill">
     <div class="c-streamer">
+      {% if order == "custom" %}
+      <button type="button" class="c-icon-btn c-grip" data-reorder-handle aria-label="並び順（{{ row.display_name }}）。ドラッグするか、上下キーで移動" title="ドラッグして並べ替え">{{ ui.icon("grip-vertical") }}</button>
+      {% endif %}
       <span class="c-streamer__avatar" aria-hidden="true">{{ row.display_name[:1] }}</span>
       <div class="c-streamer__text">
         <span class="c-streamer__name u-truncate" title="{{ row.display_name }}">{{ row.display_name }}</span>

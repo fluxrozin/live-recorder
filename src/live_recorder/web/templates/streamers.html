@@ -2,6 +2,7 @@
 {% set active_nav = "streamers" %}
 {% block title %}配信者{% endblock %}
 {% block content %}
+{% set order = order|default('default') %}
 {% call ui.page_header("配信者", "監視対象のアカウントと、録画・コメント収集の有無を管理します") %}
   <button type="button" class="c-btn c-btn--primary" data-dialog-open="add-streamer">{{ ui.icon("plus") }}配信者を追加</button>
 {% endcall %}
@@ -24,12 +25,19 @@
       <span aria-hidden="true">·</span><span>監視停止 <strong>{{ paused_n }}</strong></span>
       {% if error_n %}<span aria-hidden="true">·</span><span class="c-status c-status--danger">{{ ui.icon("circle-x") }}エラー {{ error_n }}</span>{% endif %}
     </p>
+    <form class="c-segmented" method="post" action="/streamers/order" role="group" aria-label="並び順"
+          hx-post="/streamers/order" hx-target="#streamers-live" hx-select="#streamers-live" hx-swap="outerHTML">
+      {{ ui.csrf_input() }}
+      <button type="submit" name="order" value="default" aria-pressed="{{ 'true' if order != 'custom' else 'false' }}">デフォルト</button>
+      <button type="submit" name="order" value="custom" aria-pressed="{{ 'true' if order == 'custom' else 'false' }}">カスタム</button>
+    </form>
     <div class="c-toolbar__search c-search">
       {{ ui.icon("search") }}
       <label class="u-sr-only" for="streamer-filter">配信者を絞り込む</label>
       <input class="c-input" id="streamer-filter" type="search" placeholder="名前・IDで絞り込み" autocomplete="off" data-filter-target="#streamer-rows" data-filter-count="#streamer-count">
     </div>
   </div>
+  <p id="reorder-status" class="u-sr-only" aria-live="polite"></p>
   <div class="c-table-wrap">
     <table class="c-table c-table--stack c-streamers-table">
       <thead>
@@ -50,7 +58,7 @@
     </table>
     <div data-filter-empty hidden>{{ ui.empty("search", "該当する配信者はいません", "名前またはユーザーIDの一部で絞り込めます。", compact=True) }}</div>
   </div>
-  <p class="c-card__footer"><span class="u-row u-row--wrap">{{ ui.poll_status(rendered_at, tz) }}<span>{{ ui.icon("info", "sm") }}スイッチは即時に保存されます。監視を停止すると、その配信者の状態は「監視停止」になります。</span></span></p>
+  <p class="c-card__footer"><span class="u-row u-row--wrap">{{ ui.poll_status(rendered_at, tz) }}<span>{{ ui.icon("info", "sm") }}スイッチは即時に保存されます。</span></span></p>
   {% else %}
   {% call ui.empty("radio-tower", "配信者はまだ登録されていません", "TikTok LIVE または Twitcasting のアカウントを登録すると、配信開始を検知して自動で録画します。") %}
     <button type="button" class="c-btn c-btn--primary" data-dialog-open="add-streamer">{{ ui.icon("plus") }}配信者を追加</button>

@@ -210,6 +210,74 @@ def test_recording_history_delete_keeps_database_constraints(client):
     assert "テスト配信" not in client.get("/recordings").text
 
 
+def test_streamer_order_switches_between_name_and_custom(client):
+    token = _login(client)
+    for account, name in (("aiu.sort", "あいう"), ("kakiku.sort", "かきく")):
+        created = client.post(
+            "/streamers",
+            data={
+                "csrf": token,
+                "platform": "tiktok",
+                "account": account,
+                "display_name": name,
+                "monitoring_enabled": "on",
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+
+    def names(html: str) -> list[str]:
+        return re.findall(r'class="c-streamer__name[^"]*">([^<]+)', html)
+
+    listing = client.get("/streamers").text
+    assert names(listing) == ["あいう", "かきく", "配信中の人"]
+    assert "data-reorder-handle" not in listing
+    rejected = client.post(
+        "/streamers/order",
+        data={"csrf": token, "order": "nope"},
+        headers={"HX-Request": "true"},
+    )
+    assert rejected.status_code == 400
+    switched = client.post(
+        "/streamers/order",
+        data={"csrf": token, "order": "custom"},
+        headers={"HX-Request": "true"},
+    )
+    assert switched.status_code == 200
+    assert names(switched.text) == ["配信中の人", "あいう", "かきく"]
+    assert switched.text.count("data-reorder-handle") == 3
+    assert names(client.get("/streamers").text) == ["配信中の人", "あいう", "かきく"]
+    order = re.findall(r'id="streamer-(\d+)"', client.get("/streamers").text)
+    saved = client.post(
+        "/streamers/reorder",
+        data={"id": list(reversed(order))},
+        headers={"X-CSRF-Token": token},
+    )
+    assert saved.status_code == 204
+    assert re.findall(r'id="streamer-(\d+)"', client.get("/streamers").text) == list(reversed(order))
+    partial = client.post(
+        "/streamers/reorder",
+        data={"id": order[:1]},
+        headers={"X-CSRF-Token": token},
+    )
+    assert partial.status_code == 409
+    assert re.findall(r'id="streamer-(\d+)"', client.get("/streamers").text) == list(reversed(order))
+    defaulted = client.post(
+        "/streamers/order",
+        data={"csrf": token, "order": "default"},
+        follow_redirects=True,
+    )
+    assert names(defaulted.text) == ["あいう", "かきく", "配信中の人"]
+    assert "data-reorder-handle" not in defaulted.text
+    restored = client.post(
+        "/streamers/order",
+        data={"csrf": token, "order": "custom"},
+        follow_redirects=True,
+    )
+    assert re.findall(r'id="streamer-(\d+)"', restored.text) == list(reversed(order))
+    assert client.post("/streamers/reorder", data={"id": order}).status_code == 403
+
+
 def test_streamer_lifecycle(client):
     token = _login(client)
     bad = client.post(

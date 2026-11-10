@@ -46,9 +46,10 @@
 <span class="c-freshness" title="{{ when|localtime(tz) }}">{{ icon("clock", "sm") }}{{ label }} <time datetime="{{ when|iso }}" class="u-num">{{ when|clock(tz) }}</time></span>
 {%- endmacro %}
 
-{# 30秒ごとの差し替え。外枠は残し、body_id の中身だけを現在のURLで取り直す。 #}
+{# 30秒ごとの差し替え。外枠は残し、body_id の中身だけを現在のURLで取り直す。
+   hx-select は子へ継承される。配信者スイッチの応答は行だけで、その中に body_id が無いと差し替えが空になり行が消える。 #}
 {% macro live_poll(poll_id, body_id, url) -%}
-id="{{ poll_id }}" data-poll="30" hx-get="{{ url }}" hx-trigger="every 30s, lr:refresh" hx-select="#{{ body_id }}" hx-target="#{{ body_id }}" hx-swap="outerHTML ignoreTitle:true" hx-select-oob="#topbar-freshness:innerHTML" hx-indicator="find [data-poll-status]"
+id="{{ poll_id }}" data-poll="30" hx-get="{{ url }}" hx-trigger="every 30s, lr:refresh" hx-select="#{{ body_id }}" hx-target="#{{ body_id }}" hx-swap="outerHTML ignoreTitle:true" hx-select-oob="#topbar-freshness:innerHTML" hx-indicator="find [data-poll-status]" hx-disinherit="hx-select hx-select-oob"
 {%- endmacro %}
 
 {% macro poll_status(when, tz) -%}
