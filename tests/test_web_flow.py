@@ -154,6 +154,7 @@ def test_pages_require_login(client):
         "/comments",
         "/settings",
         "/system",
+        "/system/scan",
         "/partials/active-sessions",
     ):
         response = client.get(path, follow_redirects=False)
@@ -351,6 +352,16 @@ def test_comment_partial_and_export_keep_filters(client):
 
 def test_system_scan(client):
     token = _login(client)
-    response = client.post("/system/scan", data={"csrf": token})
-    assert response.status_code == 200
-    assert "ファイル不足" in response.text and "missing.mp4" in response.text
+    posted = client.post("/system/scan", data={"csrf": token}, follow_redirects=False)
+    assert posted.status_code == 303
+    assert posted.headers["location"] == "/system#scan"
+    partial = client.get("/system", headers={"HX-Request": "true"})
+    assert partial.status_code == 200
+    assert "missing.mp4" not in partial.text
+    page = client.get("/system")
+    assert page.status_code == 200
+    assert "ファイル不足" in page.text and "missing.mp4" in page.text
+    assert "missing.mp4" not in client.get("/system").text
+    leftover = client.get("/system/scan", follow_redirects=False)
+    assert leftover.status_code == 303
+    assert leftover.headers["location"] == "/system"

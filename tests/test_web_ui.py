@@ -684,6 +684,7 @@ def test_existing_routes_are_kept(tmp_path):
         ("GET", "/settings"),
         ("POST", "/settings"),
         ("GET", "/system"),
+        ("GET", "/system/scan"),
         ("POST", "/system/scan"),
         ("GET", "/partials/active-sessions"),
         ("GET", "/partials/recording-state"),

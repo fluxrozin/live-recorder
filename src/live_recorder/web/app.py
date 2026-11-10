@@ -1084,8 +1084,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         blocked = await require_user(request)
         if blocked:
             return blocked
-        payload = await _system_payload(request, None)
+        # 定期更新は #system-live だけを差し替える。ここで結果を消費すると、直後の表示から消える。
+        held = None if request.headers.get("hx-request") == "true" else _take_scan(request)
+        payload = await _system_payload(request, held["report"] if held else None)
+        if held:
+            payload["scan"] = held["scan"]
         return await render(request, "system.html", **payload)
+
+    @app.get("/system/scan")
+    async def system_scan_page(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        # 照合は POST だけ。残ったアドレスの再読み込みを 405 にしない。
+        return RedirectResponse("/system", status_code=303)
 
     @app.post("/system/scan")
     async def system_scan(request: Request):
@@ -1107,14 +1119,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for segment in segments
             ]
         report = scan_storage(request.app.state.settings.recordings_dir, payload_segments)
-        payload = await _system_payload(request, report)
         problems = set(report.missing) | set(report.size_mismatch) | set(report.suspect)
         checked = [item for item in payload_segments if not item["file_removed"]]
-        payload["scan"] = {
-            "checked": len(checked),
-            "ok": sum(1 for item in checked if item["file_path"] not in problems),
-        }
-        return await render(request, "system.html", **payload)
+        _remember_scan(
+            request,
+            report,
+            {
+                "checked": len(checked),
+                "ok": sum(1 for item in checked if item["file_path"] not in problems),
+            },
+        )
+        # 200 のまま返すとアドレスが /system/scan になり、定期更新の GET が 405 になる。
+        return RedirectResponse("/system#scan", status_code=303)
 
     return app
 
@@ -1637,6 +1653,23 @@ async def _component_versions(request: Request) -> dict:
     }
     request.app.state.component_versions = cached
     return cached
+
+
+def _remember_scan(request: Request, report, summary: dict) -> None:
+    """照合結果は次の画面表示で一度だけ使う。パス一覧はクッキーに収まらない。"""
+    uid = int(request.session["uid"])
+    results = getattr(request.app.state, "scan_results", None)
+    if results is None:
+        results = {}
+        request.app.state.scan_results = results
+    results[uid] = {"report": report, "scan": summary}
+
+
+def _take_scan(request: Request) -> dict | None:
+    results = getattr(request.app.state, "scan_results", None)
+    if not results:
+        return None
+    return results.pop(int(request.session["uid"]), None)
 
 
 async def _system_payload(request: Request, report) -> dict:
