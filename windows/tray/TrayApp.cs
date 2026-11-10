@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 sealed class TrayConfig
 {
@@ -93,6 +94,8 @@ static class JsonRead
 
 sealed class TrayContext : ApplicationContext
 {
+    const string StartupRunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string StartupRunValue = "LiveRecorderTray";
     readonly List<MemoryStream> _iconStreams = new List<MemoryStream>();
     readonly Form _gate;
     readonly NotifyIcon _notify;
@@ -101,6 +104,7 @@ sealed class TrayContext : ApplicationContext
     readonly ToolStripMenuItem _stop;
     readonly ToolStripMenuItem _rebuild;
     readonly ToolStripMenuItem _open;
+    readonly ToolStripMenuItem _startup;
     readonly ToolStripMenuItem _exit;
     readonly Icon _iconIdle;
     readonly Icon _iconRecording;
@@ -137,6 +141,9 @@ sealed class TrayContext : ApplicationContext
         _rebuild.Click += delegate { RebuildStack(); };
         _open = new ToolStripMenuItem("管理画面を開く");
         _open.Click += delegate { OpenBrowser(); };
+        _startup = new ToolStripMenuItem("Windows起動時に自動実行");
+        _startup.CheckOnClick = true;
+        _startup.Click += delegate { ApplyStartup(); };
         _exit = new ToolStripMenuItem("停止して終了");
         _exit.Click += delegate { RequestExit(); };
 
@@ -147,7 +154,10 @@ sealed class TrayContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_open);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_startup);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_exit);
+        menu.Opening += delegate { _startup.Checked = StartupRegistered(); };
 
         _notify = new NotifyIcon();
         _notify.Icon = _iconStopped;
@@ -453,7 +463,58 @@ sealed class TrayContext : ApplicationContext
         _stop.Enabled = have && !locked && (_healthOk || _running > 0 || _upPending);
         _rebuild.Enabled = have && !locked;
         _open.Enabled = have && !_exitRequested;
+        _startup.Enabled = !_exitRequested;
         _exit.Enabled = !_exitRequested;
+    }
+
+    void ApplyStartup()
+    {
+        bool enable = _startup.Checked;
+        try
+        {
+            using (var key = Registry.CurrentUser.CreateSubKey(StartupRunKey))
+            {
+                if (key == null) throw new InvalidOperationException("registry");
+                if (enable)
+                    key.SetValue(StartupRunValue, StartupCommand(), RegistryValueKind.String);
+                else
+                    key.DeleteValue(StartupRunValue, false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _startup.Checked = StartupRegistered();
+            Balloon("自動実行を変更できません", ex.Message);
+        }
+    }
+
+    static bool StartupRegistered()
+    {
+        try
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(StartupRunKey, false))
+            {
+                if (key == null) return false;
+                return SameStartup(key.GetValue(StartupRunValue) as string);
+            }
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    static bool SameStartup(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return false;
+        if (string.Equals(value, StartupCommand(), StringComparison.OrdinalIgnoreCase)) return true;
+        string path = Assembly.GetExecutingAssembly().Location;
+        return string.Equals(value.Trim().Trim('"'), path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    static string StartupCommand()
+    {
+        return "\"" + Assembly.GetExecutingAssembly().Location.Replace("\"", "") + "\"";
     }
 
     void Balloon(string title, string text)
