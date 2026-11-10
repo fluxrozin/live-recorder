@@ -36,10 +36,10 @@ def comment_export_name(video_name: str) -> str:
 
 
 def comment_sidecar_relatives(video_relative: str) -> list[str]:
-    """自動書き出しの SRT と、以前の JSONL / CSV / TXT を削除対象にする。"""
+    """自動書き出しの SRT、以前の JSONL / CSV / TXT、統合 ASS を削除対象にする。"""
     path = Path(video_relative)
     parent = path.parent
-    names = [comment_export_name(path.name)]
+    names = [comment_export_name(path.name), path.with_suffix(".ass").name]
     names.extend(path.with_suffix(suffix).name for suffix in _LEGACY_EXPORT_SUFFIXES)
     return [(parent / name).as_posix() for name in dict.fromkeys(names)]
 

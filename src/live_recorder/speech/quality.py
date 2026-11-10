@@ -31,12 +31,12 @@ class SpeechCue:
     avg_logprob: float = 0.0
 
 
-def keep_stable(cues: list[SpeechCue]) -> list[SpeechCue]:
+def keep_stable(cues: list[SpeechCue], *, hotwords: str | None = None) -> list[SpeechCue]:
     """faster-whisper が温度 0 で残す悪い窓と、無音の定型句を捨てる。"""
     kept: list[SpeechCue] = []
     previous: str | None = None
     for cue in cues:
-        text = cue.text.strip()
+        text = strip_hotword_echo(cue.text.strip(), hotwords)
         if not text or cue.end <= cue.start:
             continue
         if cue.compression_ratio > _MAX_COMPRESSION_RATIO or cue.avg_logprob < _MIN_AVG_LOGPROB:
@@ -56,6 +56,41 @@ def keep_stable(cues: list[SpeechCue]) -> list[SpeechCue]:
             )
         )
     return kept
+
+
+def strip_hotword_echo(text: str, hotwords: str | None) -> str:
+    """単語リストが前文として渡されると、その並びが末尾に書き写される。3語以上の連続だけ外す。"""
+    words = [word for word in (hotwords or "").split() if word]
+    if len(words) < 3:
+        return text.strip()
+    tokens = text.split()
+    while tokens:
+        start, end = _longest_hotword_run(tokens, words)
+        if end - start < 3:
+            break
+        del tokens[start:end]
+    return " ".join(tokens).strip()
+
+
+def _longest_hotword_run(tokens: list[str], words: list[str]) -> tuple[int, int]:
+    best = (0, 0)
+    for start, token in enumerate(tokens):
+        key = _token_key(token)
+        for offset, word in enumerate(words):
+            if key != word:
+                continue
+            end = start
+            index = offset
+            while end < len(tokens) and index < len(words) and _token_key(tokens[end]) == words[index]:
+                end += 1
+                index += 1
+            if end - start > best[1] - best[0]:
+                best = (start, end)
+    return best
+
+
+def _token_key(token: str) -> str:
+    return token.strip("。．.！!？?、,，・")
 
 
 def _is_hallucination(text: str) -> bool:

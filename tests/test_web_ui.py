@@ -314,6 +314,9 @@ def test_segment_download_only_when_file_exists():
     assert "/segments/2/download" not in html
     assert "/segments/3/download" not in html
     assert 'href="/recordings/segments/1/speech"' in html
+    assert 'href="/recordings/segments/1/ass"' in html
+    assert ">統合 (ASS)</a>" in html
+    assert "統合字幕のスタイルは Speech と Comment です" in html
     assert "/segments/2/speech" not in html
     assert 'href="/speech?session_id=101"' in html
     assert "音声字幕 (SRT)" in html
@@ -659,6 +662,7 @@ def test_existing_routes_are_kept(tmp_path):
         ("POST", "/recordings/{session_id}/delete"),
         ("GET", "/recordings/segments/{segment_id}/download"),
         ("GET", "/recordings/segments/{segment_id}/speech"),
+        ("GET", "/recordings/segments/{segment_id}/ass"),
         ("GET", "/speech"),
         ("GET", "/speech/cues"),
         ("POST", "/speech/retry-failed"),

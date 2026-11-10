@@ -90,10 +90,10 @@ def test_srt_uses_segment_offset_and_keeps_overlaps():
             {"nickname": "早", "user_id": "u", "message": "前", "recording_offset_ms": -500},
         ]
     )
-    assert text.index("早: 前") < text.index("late: 次") < text.index("名: こんにちは")
-    assert "1\n00:00:00,000 --> 00:00:05,000\n早: 前\n" in text
-    assert "2\n00:00:01,000 --> 00:00:06,000\nlate: 次\n" in text
-    assert "3\n00:01:23,450 --> 00:01:28,450\n名: こんにちは\n" in text
+    assert text.index("前 (早)") < text.index("次 (late)") < text.index("こんにちは (名)")
+    assert "1\n00:00:00,000 --> 00:00:05,000\n前 (早)\n" in text
+    assert "2\n00:00:01,000 --> 00:00:06,000\n次 (late)\n" in text
+    assert "3\n00:01:23,450 --> 00:01:28,450\nこんにちは (名)\n" in text
 
 
 def test_srt_collapses_blank_lines_and_falls_back_to_user_id():
@@ -104,9 +104,9 @@ def test_srt_collapses_blank_lines_and_falls_back_to_user_id():
         ]
     )
     assert text == (
-        "1\n00:00:00,000 --> 00:00:05,000\nunknown: 本文\n"
+        "1\n00:00:00,000 --> 00:00:05,000\n本文 (unknown)\n"
         "\n"
-        "2\n00:00:00,000 --> 00:00:05,000\n名: 一行目\n二行目\n"
+        "2\n00:00:00,000 --> 00:00:05,000\n一行目\n二行目 (名)\n"
     )
 
 
@@ -157,6 +157,7 @@ def test_comment_export_uses_recording_stem():
     relatives = comment_sidecar_relatives("tiktok/user/day/clip.ts")
     assert relatives[0] == "tiktok/user/day/clip_Comments.srt"
     assert relatives[1:] == [
+        "tiktok/user/day/clip.ass",
         "tiktok/user/day/clip.jsonl",
         "tiktok/user/day/clip.csv",
         "tiktok/user/day/clip.txt",

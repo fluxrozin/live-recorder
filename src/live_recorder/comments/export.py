@@ -28,8 +28,8 @@ def _cue_text(row: dict[str, object]) -> str:
     lines = [line.strip() for line in _BLANK_LINES.sub("\n", message).split("\n")]
     text = "\n".join(line for line in lines if line)
     if text:
-        return f"{author}: {text}"
-    return f"{author}:"
+        return f"{text} ({author})"
+    return f"({author})"
 
 
 def render_srt(rows: Iterable[dict[str, object]], *, duration_ms: int = CUE_DURATION_MS) -> str:

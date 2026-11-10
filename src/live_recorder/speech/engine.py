@@ -43,4 +43,4 @@ def transcribe(model, audio_path: Path, *, language: str, hotwords: str | None =
         )
         for segment in segments
     ]
-    return keep_stable(cues)
+    return keep_stable(cues, hotwords=cleaned or None)

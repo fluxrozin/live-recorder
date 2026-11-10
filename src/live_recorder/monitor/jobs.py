@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from live_recorder.comments.ass import refresh_combined_ass
 from live_recorder.comments.export import encode_export, export_row
 from live_recorder.comments.segments import (
     ExportSegment,
@@ -677,6 +678,13 @@ def _write_comment_file(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_bytes(body)
 
 
+def _refresh_ass(video: Path, ffprobe: str) -> None:
+    try:
+        refresh_combined_ass(video, ffprobe=ffprobe)
+    except Exception:
+        log.exception("combined ass failed")
+
+
 async def _auto_export(settings: Settings, repo: Repository, session_id: int, job, tz_name: str) -> None:
     try:
         stream = await repo.get_session(session_id)
@@ -724,6 +732,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                     for comment in grouped
                 ]
                 _write_comment_file(target, rows)
+                _refresh_ass(video, settings.ffprobe_path)
                 written.append(target)
         else:
             rows = [

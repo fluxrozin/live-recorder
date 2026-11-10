@@ -81,7 +81,7 @@
 <section class="c-card" aria-labelledby="files-title">
   <header class="c-card__header">
     <h2 class="c-card__title" id="files-title">{{ ui.icon("file-video") }}録画ファイル <span class="c-count">{{ detail.segments|length }}</span></h2>
-    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれます。コメント字幕（_Comments.srt）と音声字幕（_Speech.srt）もセグメントごとに出力します。音声字幕は確定後に作成します。</p>
+    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれます。コメント字幕と音声字幕に加え、同じ名前の統合字幕（.ass）を出します。統合字幕のスタイルは Speech と Comment です。MPC-HC の字幕スタイルで、それぞれ書体・大きさ・色を指定できます。音声字幕は確定後に作成します。</p>
   </header>
   {% if detail.segments %}
   <div class="c-table-wrap">
@@ -134,6 +134,7 @@
             <span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}ファイルなし</span>
             {% else %}
             <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/download" download aria-label="{{ segment.name }} の動画をダウンロード（{{ segment.size|bytes }}）">{{ ui.icon("download", "sm") }}動画</a>
+            <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/ass" download aria-label="セグメント {{ segment.number }} の統合字幕をダウンロード">{{ ui.icon("download", "sm") }}統合 (ASS)</a>
             {% endif %}
             <a class="c-btn c-btn--sm" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=srt" download aria-label="セグメント {{ segment.number }} のコメントをダウンロード">{{ ui.icon("download", "sm") }}コメント</a>
             {% if segment.speech_ready %}
@@ -205,7 +206,7 @@
 
 {% call ui.confirm_dialog("delete-files", "録画ファイルを削除", "/recordings/" ~ detail.id ~ "/delete-files", "ファイルを削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="録画ファイルが元に戻せないことを理解しました", icon_name="file-video") %}
   <div class="c-impact">
-    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）と、同じ名前のコメントファイル・音声字幕を保存先から削除") }}
+    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）と、同じ名前のコメントファイル・音声字幕・統合字幕を保存先から削除") }}
     {{ ui.impact("keep", "録画履歴とコメント " ~ "{:,}".format(detail.comments_total) ~ " 件は残ります") }}
   </div>
 {% endcall %}
@@ -213,15 +214,15 @@
 {% call ui.confirm_dialog("delete-history", "録画履歴を削除", "/recordings/" ~ detail.id ~ "/delete", "履歴を削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="履歴とコメントが元に戻せないことを理解しました", icon_name="history") %}
   <div class="c-impact">
     {{ ui.impact("remove", "この録画セッションの履歴と、録画ファイル・欠損の記録") }}
-    {{ ui.impact("remove", "コメント " ~ "{:,}".format(detail.comments_total) ~ " 件と、自動書き出し済みのコメントファイル") }}
+    {{ ui.impact("remove", "コメント " ~ "{:,}".format(detail.comments_total) ~ " 件と、自動書き出し済みのコメントファイル・統合字幕") }}
     {{ ui.impact("keep", "録画ファイル " ~ visible|length ~ " 個は保存先に残ります（管理画面からは参照できなくなります）") }}
   </div>
 {% endcall %}
 
 {% call ui.confirm_dialog("delete-all", "履歴とファイルをすべて削除", "/recordings/" ~ detail.id ~ "/delete", "すべて削除", subtitle=detail.name ~ " · #" ~ detail.id, ack="履歴・コメント・録画ファイルが元に戻せないことを理解しました", hidden={"delete_files": "yes"}) %}
   <div class="c-impact">
-    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）と、同じ名前の音声字幕") }}
-    {{ ui.impact("remove", "コメント " ~ "{:,}".format(detail.comments_total) ~ " 件と、自動書き出し済みのコメントファイル") }}
+    {{ ui.impact("remove", "録画ファイル " ~ visible|length ~ " 個（合計 " ~ (total_size|bytes) ~ "）と、同じ名前の音声字幕・統合字幕") }}
+    {{ ui.impact("remove", "コメント " ~ "{:,}".format(detail.comments_total) ~ " 件と、自動書き出し済みのコメントファイル・統合字幕") }}
     {{ ui.impact("remove", "この録画セッションの履歴と欠損の記録") }}
   </div>
 {% endcall %}

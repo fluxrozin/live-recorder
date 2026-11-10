@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import secrets
 import zipfile
@@ -15,6 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from live_recorder import __version__
 from live_recorder.cli import verify_password
+from live_recorder.comments.ass import refresh_combined_ass, unlink_combined_ass
 from live_recorder.comments.export import encode_export, export_row
 from live_recorder.comments.segments import (
     ExportSegment,
@@ -673,6 +675,77 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/recordings/segments/{segment_id}/ass")
+    async def download_combined_ass(request: Request, segment_id: int):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        tz = await runtime_tz(request)
+        async with request.app.state.db.session() as session:
+            repo = Repository(session)
+            found = await repo.segment_with_session(segment_id)
+            if found is None:
+                raise HTTPException(404)
+            segment, session_id = found
+            if segment.file_removed:
+                raise HTTPException(404)
+            relative = segment.file_path
+            stored = await repo.export_comments(
+                session_id=session_id,
+                text=None,
+                user_id=None,
+                nickname=None,
+                streamer_id=None,
+                platform=None,
+                start=None,
+                end=None,
+            )
+            rows: list[dict[str, object]] = []
+            for window, grouped in partition_by_segment(
+                stored,
+                [_window(item) for item in await repo.segments_for_session(session_id)],
+                lambda comment: comment.posted_at or comment.received_at,
+            ):
+                if window.id != segment_id:
+                    continue
+                rows = [
+                    _comment_row(
+                        comment,
+                        tz,
+                        segment_offset_ms(comment.posted_at or comment.received_at, window.started_at),
+                    )
+                    for comment in grouped
+                ]
+        try:
+            video = resolve_stored(request.app.state.settings.recordings_dir, relative)
+        except PathEscape as exc:
+            raise HTTPException(404) from exc
+        if not video.is_file():
+            raise HTTPException(404)
+        if rows:
+            payload, _media = encode_export(rows)
+            video.with_name(comment_export_name(video.name)).write_bytes(payload)
+        try:
+            written = await asyncio.to_thread(
+                refresh_combined_ass,
+                video,
+                ffprobe=request.app.state.settings.ffprobe_path,
+            )
+        except Exception as exc:
+            raise HTTPException(404) from exc
+        if written is None or not written.is_file():
+            raise HTTPException(404)
+        body = written.read_bytes()
+        return Response(
+            content=body,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{written.name}"',
+                "Content-Length": str(len(body)),
+                "Cache-Control": "no-store",
+            },
+        )
+
     @app.get("/speech/cues", response_class=HTMLResponse)
     async def speech_cues_page(request: Request):
         blocked = await require_user(request)
@@ -1300,6 +1373,7 @@ def _comment_download(comments, windows, selected: int | None, tz: str) -> tuple
 
 def _unlink_speech_files(root: Path, video: Path, srt_relative: str | None) -> None:
     unlink_speech_sidecar(video)
+    unlink_combined_ass(video)
     if not srt_relative:
         return
     try:

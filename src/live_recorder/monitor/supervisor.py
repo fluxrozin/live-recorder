@@ -9,6 +9,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
+from live_recorder.comments.ass import unlink_combined_ass
 from live_recorder.comments.segments import comment_sidecar_relatives
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
@@ -462,6 +463,7 @@ class Supervisor:
         if path.is_file():
             path.unlink()
         unlink_speech_sidecar(path)
+        unlink_combined_ass(path)
 
     async def _event(self, event_type: str, message: str, *, severity: str) -> None:
         async with self.db.session() as session:

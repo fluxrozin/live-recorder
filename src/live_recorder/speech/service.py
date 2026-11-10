@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from live_recorder.comments.ass import refresh_combined_ass
 from live_recorder.config import load_settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import load_runtime
@@ -143,6 +144,13 @@ async def _run(stop: asyncio.Event) -> None:
                 produced_relative = relative_to_root(settings.recordings_dir, produced)
             srt_relative = speech_result_path(status=status, produced=produced_relative, previous=previous_srt)
             await _finish(db, segment_id, status, srt_relative, error, keep_path=False)
+            if status == "completed":
+                try:
+                    await asyncio.to_thread(
+                        refresh_combined_ass, video, ffprobe=settings.ffprobe_path
+                    )
+                except Exception:
+                    log.exception("combined ass failed for segment %s", segment_id)
             if status == "failed":
                 log.warning("speech segment %s failed: %s", segment_id, error)
             else:

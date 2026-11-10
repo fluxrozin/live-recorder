@@ -89,6 +89,27 @@ def test_keep_stable_drops_reference_failures_and_extra_noise():
     ]
 
 
+def test_keep_stable_removes_copied_hotword_runs_and_keeps_a_single_word():
+    words = "ハートミー 人気アップ おつきゅ コンカフェ おーか 斎藤 ドゥー 才蔵"
+    echo = "おつきゅ コンカフェ おーか 斎藤 ドゥー 才蔵"
+    kept = keep_stable(
+        [
+            _cue(f"あくのごまちゃん 素晴らしいにゃん ありがとう あくのごまちゃん {echo}"),
+            _cue("おつきゅ ありがとう"),
+            _cue(f"{echo}。"),
+            _cue("プープー言ってる猫ちゃんの話?"),
+            _cue("おつきゅ コンカフェ"),
+        ],
+        hotwords=words,
+    )
+    assert [cue.text for cue in kept] == [
+        "あくのごまちゃん 素晴らしいにゃん ありがとう あくのごまちゃん",
+        "おつきゅ ありがとう",
+        "プープー言ってる猫ちゃんの話?",
+        "おつきゅ コンカフェ",
+    ]
+
+
 def test_write_speech_srt_replaces_atomically_and_removes_empty(tmp_path):
     target = tmp_path / "recording_Speech.srt"
     count = write_speech_srt([SpeechCue(0, 1.5, "こんにちは")], target)
