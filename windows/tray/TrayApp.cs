@@ -1,0 +1,572 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Net;
+using System.Reflection;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+sealed class TrayConfig
+{
+    public string Distro;
+    public string Project;
+    public int WebPort;
+}
+
+sealed class CommandResult
+{
+    public int Code;
+    public string Stdout;
+    public string Stderr;
+
+    public bool Ok { get { return Code == 0; } }
+}
+
+sealed class HealthResult
+{
+    public bool Ok;
+    public bool Recording;
+}
+
+static class JsonRead
+{
+    public static string String(string json, string key)
+    {
+        int colon = Colon(json, key);
+        if (colon < 0) return null;
+        int i = Skip(json, colon + 1);
+        if (i >= json.Length || json[i] != '"') return null;
+        var sb = new StringBuilder();
+        for (int p = i + 1; p < json.Length; p++)
+        {
+            char c = json[p];
+            if (c == '\\' && p + 1 < json.Length)
+            {
+                p++;
+                char n = json[p];
+                if (n == 'n') sb.Append('\n');
+                else if (n == 'r') sb.Append('\r');
+                else if (n == 't') sb.Append('\t');
+                else sb.Append(n);
+                continue;
+            }
+            if (c == '"') return sb.ToString();
+            sb.Append(c);
+        }
+        return null;
+    }
+
+    public static bool? Bool(string json, string key)
+    {
+        int colon = Colon(json, key);
+        if (colon < 0) return null;
+        int i = Skip(json, colon + 1);
+        if (i + 4 <= json.Length && json.Substring(i, 4) == "true") return true;
+        if (i + 5 <= json.Length && json.Substring(i, 5) == "false") return false;
+        return null;
+    }
+
+    public static int Int(string json, string key, int fallback)
+    {
+        int colon = Colon(json, key);
+        if (colon < 0) return fallback;
+        int i = Skip(json, colon + 1);
+        int end = i;
+        if (end < json.Length && (json[end] == '-' || json[end] == '+')) end++;
+        int digits = end;
+        while (end < json.Length && char.IsDigit(json[end])) end++;
+        if (end == digits) return fallback;
+        int value;
+        if (!int.TryParse(json.Substring(i, end - i), out value)) return fallback;
+        return value;
+    }
+
+    static int Colon(string json, string key)
+    {
+        string needle = "\"" + key + "\"";
+        int from = 0;
+        while (from < json.Length)
+        {
+            int at = json.IndexOf(needle, from, StringComparison.Ordinal);
+            if (at < 0) return -1;
+            int i = Skip(json, at + needle.Length);
+            if (i < json.Length && json[i] == ':') return i;
+            from = at + needle.Length;
+        }
+        return -1;
+    }
+
+    static int Skip(string json, int i)
+    {
+        while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+        return i;
+    }
+}
+
+sealed class TrayContext : ApplicationContext
+{
+    readonly List<MemoryStream> _iconStreams = new List<MemoryStream>();
+    readonly Form _gate;
+    readonly NotifyIcon _notify;
+    readonly System.Windows.Forms.Timer _timer;
+    readonly ToolStripMenuItem _start;
+    readonly ToolStripMenuItem _stop;
+    readonly ToolStripMenuItem _open;
+    readonly Icon _iconIdle;
+    readonly Icon _iconRecording;
+    readonly Icon _iconStopped;
+    readonly TrayConfig _config;
+    bool _busy;
+    bool _polling;
+    int _running;
+    bool _healthOk;
+    bool _recording;
+    string _tip = "停止中";
+    string _lastError;
+
+    public TrayContext()
+    {
+        _gate = new Form();
+        _gate.ShowInTaskbar = false;
+        if (_gate.Handle == IntPtr.Zero) throw new InvalidOperationException("window");
+
+        _iconIdle = LoadIcon("idle.ico");
+        _iconRecording = LoadIcon("recording.ico");
+        _iconStopped = LoadIcon("stopped.ico");
+        _config = LoadConfig();
+
+        _start = new ToolStripMenuItem("起動");
+        _start.Click += delegate { StartStack(); };
+        _stop = new ToolStripMenuItem("停止");
+        _stop.Click += delegate { StopStack(); };
+        _open = new ToolStripMenuItem("管理画面を開く");
+        _open.Click += delegate { OpenBrowser(); };
+        var exit = new ToolStripMenuItem("トレイを終了");
+        exit.Click += delegate { ExitThread(); };
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add(_start);
+        menu.Items.Add(_stop);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_open);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(exit);
+
+        _notify = new NotifyIcon();
+        _notify.Icon = _iconStopped;
+        _notify.ContextMenuStrip = menu;
+        _notify.Visible = true;
+        _notify.DoubleClick += delegate { OpenBrowser(); };
+
+        _timer = new System.Windows.Forms.Timer();
+        _timer.Interval = 5000;
+        _timer.Tick += OnTick;
+        _timer.Start();
+        Apply(0, true, "", false, false);
+        RefreshStatus();
+    }
+
+    protected override void ExitThreadCore()
+    {
+        _timer.Stop();
+        _notify.Visible = false;
+        _notify.Dispose();
+        _gate.Dispose();
+        base.ExitThreadCore();
+    }
+
+    Icon LoadIcon(string name)
+    {
+        using (var input = Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
+        {
+            if (input == null) throw new InvalidOperationException("icon resource missing: " + name);
+            var ms = new MemoryStream();
+            input.CopyTo(ms);
+            ms.Position = 0;
+            _iconStreams.Add(ms);
+            return new Icon(ms);
+        }
+    }
+
+    static TrayConfig LoadConfig()
+    {
+        string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string path = Path.Combine(dir, "tray.json");
+        if (!File.Exists(path)) return null;
+        string text = File.ReadAllText(path, Encoding.UTF8);
+        string distro = JsonRead.String(text, "distro");
+        string project = JsonRead.String(text, "project");
+        if (string.IsNullOrEmpty(distro) || string.IsNullOrEmpty(project)) return null;
+        int port = JsonRead.Int(text, "web_port", 8080);
+        if (port < 1 || port > 65535) port = 8080;
+        return new TrayConfig { Distro = distro, Project = project, WebPort = port };
+    }
+
+    void OnTick(object sender, EventArgs e)
+    {
+        if (_busy) return;
+        RefreshStatus();
+    }
+
+    void Post(Action action)
+    {
+        if (_gate.IsDisposed) return;
+        try
+        {
+            _gate.BeginInvoke(action);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    void RefreshStatus()
+    {
+        if (_polling || _busy) return;
+        if (_config == null)
+        {
+            Apply(0, true, "", false, false);
+            return;
+        }
+        _polling = true;
+        var config = _config;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            var ps = RunWsl(config, "ps --all --format json", 20000);
+            int running = ps.Ok ? CountRunning(ps.Stdout) : 0;
+            var health = FetchHealth(config.WebPort);
+            Post(delegate
+            {
+                _polling = false;
+                if (_busy) return;
+                Apply(running, ps.Ok, FirstLine(ps.Stderr), health.Ok, health.Recording);
+            });
+        });
+    }
+
+    void StartStack()
+    {
+        RunUserCommand("up -d", 600000, "起動中", "起動に失敗しました");
+    }
+
+    void StopStack()
+    {
+        RunUserCommand("stop", 90000, "停止しています", "停止に失敗しました");
+    }
+
+    void RunUserCommand(string composeArgs, int timeoutMs, string progress, string failTitle)
+    {
+        if (_busy || _config == null) return;
+        _busy = true;
+        _lastError = null;
+        _tip = progress;
+        ShowIcon();
+        UpdateMenu();
+        var config = _config;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            var result = RunWsl(config, composeArgs, timeoutMs);
+            Post(delegate
+            {
+                _busy = false;
+                if (!result.Ok)
+                {
+                    string detail = string.IsNullOrEmpty(result.Stderr) ? result.Stdout : result.Stderr;
+                    _lastError = FirstLine(detail);
+                    Balloon(failTitle, detail);
+                }
+                RefreshStatus();
+            });
+        });
+    }
+
+    void OpenBrowser()
+    {
+        if (_config == null) return;
+        try
+        {
+            Process.Start("http://127.0.0.1:" + _config.WebPort.ToString() + "/");
+        }
+        catch (Exception ex)
+        {
+            Balloon("管理画面を開けません", ex.Message);
+        }
+    }
+
+    void Apply(int running, bool psOk, string psError, bool healthOk, bool recording)
+    {
+        _running = running;
+        _healthOk = healthOk;
+        _recording = recording;
+        if (_config == null)
+            _tip = "tray.json がありません";
+        else if (healthOk)
+        {
+            _lastError = null;
+            _tip = recording ? "録画中" : "待機中";
+        }
+        else if (running > 0)
+            _tip = "起動中";
+        else if (!psOk)
+            _tip = string.IsNullOrEmpty(psError) ? "Docker に接続できません" : psError;
+        else if (!string.IsNullOrEmpty(_lastError))
+            _tip = _lastError;
+        else
+            _tip = "停止中";
+        ShowIcon();
+        UpdateMenu();
+    }
+
+    void ShowIcon()
+    {
+        Icon icon = _iconStopped;
+        if (_healthOk && _recording) icon = _iconRecording;
+        else if (_healthOk) icon = _iconIdle;
+        _notify.Icon = icon;
+        _notify.Text = Tip(_tip);
+    }
+
+    void UpdateMenu()
+    {
+        bool have = _config != null;
+        _start.Enabled = have && !_busy;
+        _stop.Enabled = have && !_busy && (_healthOk || _running > 0);
+        _open.Enabled = have;
+    }
+
+    void Balloon(string title, string text)
+    {
+        if (string.IsNullOrEmpty(text)) text = title;
+        text = text.Replace("\r", "").Trim();
+        if (text.Length > 200) text = text.Substring(0, 200);
+        _notify.ShowBalloonTip(4000, title, text, ToolTipIcon.Error);
+    }
+
+    static string Tip(string text)
+    {
+        if (string.IsNullOrEmpty(text)) text = "Live Recorder";
+        text = text.Replace("\r", " ").Replace("\n", " ");
+        if (text.Length <= 63) return text;
+        return text.Substring(0, 60) + "...";
+    }
+
+    static string FirstLine(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        text = text.Trim();
+        int n = text.IndexOf('\n');
+        if (n >= 0) text = text.Substring(0, n).Trim();
+        return text;
+    }
+
+    static int CountRunning(string text)
+    {
+        int running = 0;
+        foreach (string obj in JsonObjects(text))
+        {
+            if (JsonRead.String(obj, "State") == "running") running++;
+        }
+        return running;
+    }
+
+    static List<string> JsonObjects(string text)
+    {
+        var list = new List<string>();
+        if (string.IsNullOrEmpty(text)) return list;
+        int depth = 0;
+        int start = -1;
+        bool str = false;
+        bool esc = false;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (str)
+            {
+                if (esc) esc = false;
+                else if (c == '\\') esc = true;
+                else if (c == '"') str = false;
+                continue;
+            }
+            if (c == '"') str = true;
+            else if (c == '{')
+            {
+                if (depth == 0) start = i;
+                depth++;
+            }
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0 && start >= 0)
+                {
+                    list.Add(text.Substring(start, i - start + 1));
+                    start = -1;
+                }
+            }
+        }
+        return list;
+    }
+
+    static HealthResult FetchHealth(int port)
+    {
+        var down = new HealthResult();
+        try
+        {
+            var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port.ToString() + "/healthz");
+            req.Timeout = 3000;
+            req.ReadWriteTimeout = 3000;
+            req.Method = "GET";
+            req.Proxy = null;
+            using (var res = (HttpWebResponse)req.GetResponse())
+            using (var reader = new StreamReader(res.GetResponseStream(), Encoding.UTF8))
+            {
+                string body = reader.ReadToEnd();
+                if (res.StatusCode != HttpStatusCode.OK) return down;
+                if (JsonRead.String(body, "status") != "ok") return down;
+                return new HealthResult { Ok = true, Recording = JsonRead.Bool(body, "recording") == true };
+            }
+        }
+        catch (Exception)
+        {
+            return down;
+        }
+    }
+
+    static CommandResult RunWsl(TrayConfig config, string composeArgs, int timeoutMs)
+    {
+        var psi = new ProcessStartInfo();
+        psi.FileName = "wsl.exe";
+        psi.Arguments = "-d " + Quote(config.Distro) + " --cd " + Quote(config.Project) + " -- docker compose " + composeArgs;
+        psi.UseShellExecute = false;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.CreateNoWindow = true;
+        Process proc = null;
+        try
+        {
+            proc = Process.Start(psi);
+            if (proc == null) return new CommandResult { Code = -1, Stderr = "wsl.exe を起動できません" };
+            byte[] stdout = new byte[0];
+            byte[] stderr = new byte[0];
+            var done = new ManualResetEvent(false);
+            int finished = 0;
+            var outThread = new Thread(new ThreadStart(delegate
+            {
+                try { stdout = ReadBytes(proc.StandardOutput.BaseStream); }
+                catch (Exception) { }
+                if (Interlocked.Increment(ref finished) == 2) done.Set();
+            }));
+            var errThread = new Thread(new ThreadStart(delegate
+            {
+                try { stderr = ReadBytes(proc.StandardError.BaseStream); }
+                catch (Exception) { }
+                if (Interlocked.Increment(ref finished) == 2) done.Set();
+            }));
+            outThread.IsBackground = true;
+            errThread.IsBackground = true;
+            outThread.Start();
+            errThread.Start();
+            if (!proc.WaitForExit(timeoutMs))
+            {
+                try { proc.Kill(); } catch (Exception) { }
+                proc.WaitForExit();
+                done.WaitOne(5000);
+                return new CommandResult { Code = -1, Stdout = Decode(stdout), Stderr = "タイムアウト" };
+            }
+            proc.WaitForExit();
+            done.WaitOne(5000);
+            return new CommandResult
+            {
+                Code = proc.ExitCode,
+                Stdout = Decode(stdout),
+                Stderr = Decode(stderr),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new CommandResult { Code = -1, Stderr = ex.Message };
+        }
+        finally
+        {
+            if (proc != null) proc.Dispose();
+        }
+    }
+
+    static byte[] ReadBytes(Stream stream)
+    {
+        var ms = new MemoryStream();
+        var buf = new byte[4096];
+        int n;
+        while ((n = stream.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n);
+        return ms.ToArray();
+    }
+
+    static string Decode(byte[] data)
+    {
+        if (data == null || data.Length == 0) return "";
+        if (data.Length >= 2 && data[0] == 0xFF && data[1] == 0xFE)
+            return Encoding.Unicode.GetString(data, 2, data.Length - 2);
+        if (LooksUtf16Le(data)) return Encoding.Unicode.GetString(data);
+        return Encoding.UTF8.GetString(data);
+    }
+
+    static bool LooksUtf16Le(byte[] data)
+    {
+        int samples = Math.Min(data.Length / 2, 32);
+        if (samples < 4) return false;
+        int zeros = 0;
+        for (int i = 0; i < samples; i++)
+        {
+            if (data[i * 2 + 1] == 0) zeros++;
+        }
+        return zeros > samples / 2;
+    }
+
+    static string Quote(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return "\"\"";
+        if (value.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return value;
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
+    }
+}
+
+static class Program
+{
+    static Mutex _mutex;
+
+    [STAThread]
+    static void Main()
+    {
+        bool created = false;
+        try
+        {
+            _mutex = new Mutex(true, @"Local\LiveRecorderTray", out created);
+        }
+        catch (AbandonedMutexException ex)
+        {
+            _mutex = ex.Mutex;
+            created = true;
+        }
+        if (!created) return;
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        try
+        {
+            Application.Run(new TrayContext());
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Live Recorder");
+        }
+        finally
+        {
+            if (_mutex != null)
+            {
+                _mutex.ReleaseMutex();
+                _mutex.Dispose();
+            }
+        }
+    }
+}

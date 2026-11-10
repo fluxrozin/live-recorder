@@ -23,6 +23,20 @@ docker compose exec app python -m live_recorder.cli create-admin
 
 ブラウザで `http://<ホスト>:<WEB_PORT>` を開きます。
 
+## Windows のタスクトレイ
+
+管理画面はブラウザのままです。トレイアプリは WSL 上の Docker Compose を起動・停止します。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1
+```
+
+`windows\tray\build\LiveRecorderTray.exe` ができます。同じフォルダに `tray.json` を置きます。項目は [windows/tray/tray.example.json](windows/tray/tray.example.json) のとおりで、`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパス、`web_port` は `.env` の `WEB_PORT` です。
+
+「起動」は `docker compose up -d`、「停止」は `docker compose stop` です。停止すると、録画中のセグメントはワーカーが最大 30 秒で区切ります。「トレイを終了」はアイコンだけを消し、コンテナは動いたままです。
+
+アイコンは管理画面の favicon と同じ図形です。待機中は青、録画中は赤、停止中は灰色です。録画中かどうかは `/healthz` の `recording` を見ます。赤へ替えるには、そのフィールドを含む app を一度 `docker compose up -d --build` で入れます。
+
 ## テスト
 
 ```bash
