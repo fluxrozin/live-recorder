@@ -14,14 +14,7 @@
 {% set eyebrow %}{{ ui.platform(detail.platform) }}<span class="u-mono u-truncate">{{ detail.user_id }}</span><span class="u-subtle">· #{{ detail.id }}</span>{% endset %}
 {% call ui.page_header(detail.name, detail.title if detail.title != "—" else "タイトルなし", eyebrow=eyebrow) %}
   <a class="c-btn" href="/comments?session_id={{ detail.id }}">{{ ui.icon("message-square-text") }}コメントを見る<span class="c-count">{{ "{:,}".format(detail.comments_total) }}</span></a>
-  {% if detail.segments|length <= 1 %}
-  {% set only_id = detail.segments[0].id if detail.segments else none %}
-  {% call ui.menu_button("export-menu", "エクスポート", header="この配信のコメント " ~ "{:,}".format(detail.comments_total) ~ " 件を、録画ファイルと同じ名前で出力します", icon_name="chevron-down") %}
-    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}{% if only_id %}&amp;segment_id={{ only_id }}{% endif %}&amp;format=jsonl" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">機械処理向け</span></a>
-    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}{% if only_id %}&amp;segment_id={{ only_id }}{% endif %}&amp;format=csv" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">Excel向け</span></a>
-    <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}{% if only_id %}&amp;segment_id={{ only_id }}{% endif %}&amp;format=txt" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">閲覧向け</span></a>
-  {% endcall %}
-  {% endif %}
+  <a class="c-btn" href="/comments/export?session_id={{ detail.id }}&amp;format=srt" download>{{ ui.icon("download") }}コメント (SRT)</a>
 {% endcall %}
 
 <div class="u-row u-row--wrap">
@@ -51,6 +44,7 @@
         <dt>配信ID</dt><dd class="u-mono">{{ detail.stream_id }}</dd>
         <dt>配信開始</dt><dd>{{ ui.time(detail.platform_started_at, tz) }}</dd>
         <dt>検知</dt><dd>{{ ui.time(detail.detected_at, tz) }}</dd>
+        <dt>最終確認</dt><dd>{{ ui.time(detail.last_seen_live_at, tz) }}</dd>
         <dt>終了検知</dt><dd>{{ ui.time(detail.ended_detected_at, tz) }}</dd>
       </dl>
     </div>
@@ -88,7 +82,7 @@
 <section class="c-card" aria-labelledby="files-title">
   <header class="c-card__header">
     <h2 class="c-card__title" id="files-title">{{ ui.icon("file-video") }}録画ファイル <span class="c-count">{{ detail.segments|length }}</span></h2>
-    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれ、コメントも同じ名前でセグメントごとに出力します。</p>
+    <p class="c-card__subtitle">セグメントごとにダウンロードできます。再接続が発生すると複数のファイルに分かれ、コメント字幕（_Comments.srt）もセグメントごとに出力します。</p>
   </header>
   {% if detail.segments %}
   <div class="c-table-wrap">
@@ -124,13 +118,9 @@
             {% elif not segment.exists %}
             <span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}ファイルなし</span>
             {% else %}
-            <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/download" download aria-label="{{ segment.name }} をダウンロード（{{ segment.size|bytes }}）">{{ ui.icon("download", "sm") }}ダウンロード</a>
+            <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/download" download aria-label="{{ segment.name }} の動画をダウンロード（{{ segment.size|bytes }}）">{{ ui.icon("download", "sm") }}動画</a>
             {% endif %}
-            {% call ui.menu_button("segment-comments-" ~ segment.id, "コメント", variant="sm", icon_name="download") %}
-              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=jsonl" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">録画と同じ名前</span></a>
-              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=csv" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">録画と同じ名前</span></a>
-              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=txt" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">録画と同じ名前</span></a>
-            {% endcall %}
+            <a class="c-btn c-btn--sm" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=srt" download aria-label="セグメント {{ segment.number }} のコメント (SRT) をダウンロード">{{ ui.icon("download", "sm") }}コメント (SRT)</a>
           </td>
         </tr>
         {% endfor %}

@@ -341,6 +341,7 @@ def recording_detail_context(scenario: str) -> dict:
         "status": "ENDED",
         "detected_at": now - timedelta(hours=3),
         "platform_started_at": now - timedelta(hours=3, minutes=2),
+        "last_seen_live_at": now - timedelta(minutes=32),
         "ended_detected_at": now - timedelta(minutes=30),
         "recording_status": "PARTIAL",
         "engine": "streamlink",

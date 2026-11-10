@@ -232,11 +232,7 @@ def test_comment_pagination_and_export_keep_filters():
     for link in paging:
         assert "q=hello" in link and "user_id=u1" in link and "streamer_id=2" in link
     exports = [link for link in links if link.startswith("/comments/export")]
-    assert {re.search(r"format=(\w+)", link).group(1) for link in exports} == {
-        "jsonl",
-        "csv",
-        "txt",
-    }
+    assert {re.search(r"format=(\w+)", link).group(1) for link in exports} == {"srt"}
     for link in exports:
         assert "q=hello" in link and "user_id=u1" in link and "page=" not in link
     search = next(f for f in parse(html).forms if f["attrs"].get("hx-get") == "/comments")
@@ -268,12 +264,13 @@ def test_recording_pagination_keeps_filters():
 
 def test_segment_download_only_when_file_exists():
     html = render_page("recording_detail.html", "normal")
+    assert "最終確認" in html
     assert 'href="/recordings/segments/1/download"' in html
     assert "/segments/2/download" not in html
     assert "/segments/3/download" not in html
     assert "ファイルなし" in html and "削除済み" in html
     for segment_id in (1, 2, 3):
-        assert f"segment_id={segment_id}&amp;format=jsonl" in html
+        assert f"segment_id={segment_id}&amp;format=srt" in html
 
 
 SETTINGS_FIELDS = {
@@ -483,9 +480,9 @@ def test_url_helpers_preserve_and_drop_params():
         "page": ["2"],
         "user_id": ["b"],
     }
-    export = ui.export_url(request, "csv")
+    export = ui.export_url(request, "srt")
     assert (
-        export.startswith("/comments/export?") and "format=csv" in export and "page" not in export
+        export.startswith("/comments/export?") and "format=srt" in export and "page" not in export
     )
 
 

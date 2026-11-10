@@ -505,6 +505,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "status": item.status,
                 "detected_at": item.detected_at,
                 "platform_started_at": item.platform_started_at,
+                "last_seen_live_at": item.last_seen_live_at,
                 "ended_detected_at": item.ended_detected_at,
                 "recording_status": job.status if job else "NONE",
                 "engine": job.recorder_engine if job else "—",
@@ -694,8 +695,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return blocked
         tz = await runtime_tz(request)
         filters = _comment_filters(request, tz)
-        kind = str(request.query_params.get("format") or "jsonl")
-        if kind not in {"jsonl", "csv", "txt"}:
+        kind = str(request.query_params.get("format") or "srt")
+        if kind != "srt":
             raise HTTPException(400)
         segment_raw = request.query_params.get("segment_id") or ""
         segment_id = int(segment_raw) if segment_raw.isdigit() else None
@@ -705,7 +706,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             repo = Repository(session)
             windows, selected = await _export_windows(repo, filters["query"], segment_id)
             found = await repo.export_comments(**filters["query"])
-            body, media, filename = _comment_download(found, windows, selected, kind, tz)
+            body, media, filename = _comment_download(found, windows, selected, tz)
         return Response(
             content=body,
             media_type=media,
@@ -1040,11 +1041,11 @@ def _comment_row(comment, tz: str, recording_offset_ms: int | None) -> dict[str,
     )
 
 
-def _comment_download(comments, windows, selected: int | None, kind: str, tz: str) -> tuple[bytes, str, str]:
+def _comment_download(comments, windows, selected: int | None, tz: str) -> tuple[bytes, str, str]:
     if not windows:
         rows = [_comment_row(comment, tz, comment.recording_offset_ms) for comment in comments]
-        body, media = encode_export(kind, rows)
-        return body, media, f"comments.{kind}"
+        body, media = encode_export(rows)
+        return body, media, "comments.srt"
     groups = partition_by_segment(comments, windows, lambda comment: comment.posted_at or comment.received_at)
     if selected is not None:
         groups = [(window, grouped) for window, grouped in groups if window.id == selected]
@@ -1058,13 +1059,13 @@ def _comment_download(comments, windows, selected: int | None, kind: str, tz: st
             )
             for comment in grouped
         ]
-        body, media = encode_export(kind, rows)
-        return body, media, comment_export_name(window.file_name, kind)
+        body, media = encode_export(rows)
+        return body, media, comment_export_name(window.file_name)
     buffer = io.BytesIO()
     used: set[str] = set()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for window, grouped in groups:
-            name = comment_export_name(window.file_name, kind)
+            name = comment_export_name(window.file_name)
             if name in used:
                 name = f"{Path(name).stem}_{window.id}{Path(name).suffix}"
             used.add(name)
@@ -1076,7 +1077,7 @@ def _comment_download(comments, windows, selected: int | None, kind: str, tz: st
                 )
                 for comment in grouped
             ]
-            payload, _media = encode_export(kind, rows)
+            payload, _media = encode_export(rows)
             archive.writestr(name, payload)
     return buffer.getvalue(), "application/zip", "comments.zip"
 

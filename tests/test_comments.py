@@ -1,18 +1,13 @@
 from datetime import datetime, timezone
 
 from live_recorder.comments.dedupe import dedupe_key
-from live_recorder.comments.export import (
-    csv_safe,
-    escape_log_text,
-    export_row,
-    render_csv,
-    render_txt,
-)
+from live_recorder.comments.export import export_row, render_srt
 from live_recorder.comments.offsets import offsets
 from live_recorder.comments.segments import (
     ExportSegment,
     assign_segment,
     comment_export_name,
+    comment_sidecar_relatives,
     partition_by_segment,
     segment_offset_ms,
 )
@@ -87,33 +82,32 @@ def test_missing_platform_time_is_not_invented():
     assert parse_platform_time("nope") is None
 
 
-def test_csv_formula_and_newline_escape():
-    assert csv_safe("=cmd") == "'=cmd"
-    assert csv_safe("+1") == "'+1"
-    assert csv_safe("-1") == "'-1"
-    assert csv_safe("@a") == "'@a"
-    assert csv_safe("普通") == "普通"
-    text = render_csv(
+def test_srt_uses_segment_offset_and_keeps_overlaps():
+    text = render_srt(
         [
-            {
-                "time": "2026-11-09 21:00:00",
-                "user_id": "=evil",
-                "nickname": "名",
-                "message": "こんにちは",
-                "platform": "tiktok",
-                "stream_id": "1",
-                "recording_offset": "00:00:01",
-            }
+            {"nickname": "名", "user_id": "u", "message": "こんにちは", "recording_offset_ms": 83_450},
+            {"nickname": "", "user_id": "late", "message": "次", "recording_offset_ms": 1_000},
+            {"nickname": "早", "user_id": "u", "message": "前", "recording_offset_ms": -500},
         ]
     )
-    assert "'=evil" in text
-    assert "時刻" in text
-    log = render_txt(
-        [{"user_id": "user_a", "message": "一行目\n二行目", "recording_offset_ms": 12_000}]
+    assert text.index("早: 前") < text.index("late: 次") < text.index("名: こんにちは")
+    assert "1\n00:00:00,000 --> 00:00:05,000\n早: 前\n" in text
+    assert "2\n00:00:01,000 --> 00:00:06,000\nlate: 次\n" in text
+    assert "3\n00:01:23,450 --> 00:01:28,450\n名: こんにちは\n" in text
+
+
+def test_srt_collapses_blank_lines_and_falls_back_to_user_id():
+    text = render_srt(
+        [
+            {"nickname": "", "user_id": "", "message": "本文", "recording_offset_ms": None},
+            {"nickname": "名", "user_id": "u", "message": "一行目\n\n二行目", "recording_offset_ms": 0},
+        ]
     )
-    assert log == "[00:00:12] user_a: 一行目\\n二行目\n"
-    assert "\n二" not in log.split("user_a: ", 1)[1].replace("\\n", "")
-    assert escape_log_text("a\nb") == "a\\nb"
+    assert text == (
+        "1\n00:00:00,000 --> 00:00:05,000\nunknown: 本文\n"
+        "\n"
+        "2\n00:00:00,000 --> 00:00:05,000\n名: 一行目\n二行目\n"
+    )
 
 
 def test_export_times_follow_display_timezone():
@@ -154,10 +148,19 @@ def test_export_times_follow_display_timezone():
 
 
 def test_comment_export_uses_recording_stem():
-    video = "tiktok_krk__rmn_nostream_20261109_200621_seg01.mp4"
-    assert comment_export_name(video, "jsonl") == "tiktok_krk__rmn_nostream_20261109_200621_seg01.jsonl"
-    assert comment_export_name(video, "csv") == "tiktok_krk__rmn_nostream_20261109_200621_seg01.csv"
-    assert comment_export_name("../comments.mp4", "txt") == "comments.txt"
+    video = "tiktok_@user_20261109_200621_タイトル_seg01.ts"
+    assert comment_export_name(video) == "tiktok_@user_20261109_200621_タイトル_seg01_Comments.srt"
+    assert comment_export_name("../comments.mp4") == "comments_Comments.srt"
+    long_name = comment_export_name(("あ" * 200) + ".ts")
+    assert long_name.endswith("_Comments.srt")
+    assert len(long_name.encode("utf-8")) <= 255
+    relatives = comment_sidecar_relatives("tiktok/user/day/clip.ts")
+    assert relatives[0] == "tiktok/user/day/clip_Comments.srt"
+    assert relatives[1:] == [
+        "tiktok/user/day/clip.jsonl",
+        "tiktok/user/day/clip.csv",
+        "tiktok/user/day/clip.txt",
+    ]
 
 
 def test_comments_split_across_segments_and_offsets():

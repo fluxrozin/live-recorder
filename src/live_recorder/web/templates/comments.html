@@ -89,11 +89,7 @@
     {{ ui.poll_status(rendered_at, tz) }}
     <span class="u-spacer"></span>
     {% if total %}
-    {% call ui.menu_button("export-menu", "エクスポート", header=("現在の条件に一致する全 " if chips else "すべてのコメント ") ~ "{:,}".format(total) ~ " 件を出力します（表示中のページだけではありません）", icon_name="download") %}
-      <a class="c-menu__item" role="menuitem" href="{{ export_url(request, 'jsonl') }}" download>{{ ui.icon("braces") }}JSONL<span class="c-menu__item-hint">機械処理向け</span></a>
-      <a class="c-menu__item" role="menuitem" href="{{ export_url(request, 'csv') }}" download>{{ ui.icon("sheet") }}CSV<span class="c-menu__item-hint">Excel向け</span></a>
-      <a class="c-menu__item" role="menuitem" href="{{ export_url(request, 'txt') }}" download>{{ ui.icon("file-text") }}TXT<span class="c-menu__item-hint">閲覧向け</span></a>
-    {% endcall %}
+    <a class="c-btn" href="{{ export_url(request, 'srt') }}" download title="{{ ('現在の条件に一致する全 ' if chips else 'すべてのコメント ') ~ '{:,}'.format(total) ~ ' 件を出力します（表示中のページだけではありません）' }}">{{ ui.icon("download") }}コメント (SRT)</a>
     {% endif %}
   </div>
   {% if chips %}<div class="c-toolbar">{{ ui.filter_chips(chips, "/comments") }}</div>{% endif %}

@@ -178,9 +178,12 @@ def test_pages_render_with_real_data(client):
     comments = client.get("/comments").text
     assert XSS not in comments and "&lt;script&gt;" in comments
     assert comments.index("&lt;script&gt;") < comments.index("古いコメント")
-    exported = client.get("/comments/export?format=txt")
+    exported = client.get("/comments/export?format=srt")
     assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("application/x-subrip")
+    assert "-->" in exported.text
     assert exported.text.index("古いコメント") < exported.text.index("<script>")
+    assert client.get("/comments/export?format=jsonl").status_code == 400
 
 
 def test_streamer_lifecycle(client):
@@ -315,10 +318,10 @@ def test_comment_partial_and_export_keep_filters(client):
     response = client.get("/comments?q=script", headers={"HX-Request": "true"})
     assert response.status_code == 200 and 'id="results"' in response.text
     assert (
-        "/comments/export?q=script&amp;format=csv" in response.text
-        or "format=csv&amp;q=script" in response.text
+        "/comments/export?q=script&amp;format=srt" in response.text
+        or "format=srt&amp;q=script" in response.text
     )
-    export = client.get("/comments/export?q=script&format=csv")
+    export = client.get("/comments/export?q=script&format=srt")
     assert export.status_code == 200 and "attachment" in export.headers["content-disposition"]
 
 

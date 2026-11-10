@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from live_recorder.comments.export import export_row, iter_jsonl
+from live_recorder.comments.export import encode_export, export_row
 from live_recorder.comments.segments import (
     ExportSegment,
     comment_export_name,
@@ -664,7 +664,8 @@ def _comment_row(comment, tz_name: str, stream, recording_offset_ms: int | None)
 
 def _write_comment_file(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(iter_jsonl(rows)), encoding="utf-8")
+    body, _media = encode_export(rows)
+    path.write_bytes(body)
 
 
 async def _auto_export(settings: Settings, repo: Repository, session_id: int, job, tz_name: str) -> None:
@@ -703,7 +704,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                     continue
                 segment = by_id[window.id]
                 video = resolve_stored(settings.recordings_dir, segment.file_path)
-                target = video.with_name(comment_export_name(window.file_name, "jsonl"))
+                target = video.with_name(comment_export_name(window.file_name))
                 rows = [
                     _comment_row(
                         comment,
@@ -719,7 +720,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
             rows = [
                 _comment_row(comment, tz_name, stream, comment.recording_offset_ms) for comment in comments
             ]
-            target = settings.recordings_dir / "exports" / f"session-{session_id}.jsonl"
+            target = settings.recordings_dir / "exports" / f"session-{session_id}_Comments.srt"
             _write_comment_file(target, rows)
             written.append(target)
         if written:

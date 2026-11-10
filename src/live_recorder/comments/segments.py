@@ -7,7 +7,9 @@ from pathlib import Path
 
 from live_recorder.timeutil import ensure_aware
 
-EXPORT_SUFFIXES = (".jsonl", ".csv", ".txt")
+COMMENT_EXPORT_SUFFIX = "_Comments.srt"
+_LEGACY_EXPORT_SUFFIXES = (".jsonl", ".csv", ".txt")
+_MAX_NAME_BYTES = 255
 
 
 @dataclass(frozen=True)
@@ -18,19 +20,28 @@ class ExportSegment:
     started_at: datetime
 
 
-def comment_export_name(video_name: str, kind: str) -> str:
-    """録画ファイルと同じ幹の名前にする。拡張子だけ出力形式に変える。"""
+def comment_export_name(video_name: str) -> str:
+    """録画ファイルと同じ幹に _Comments.srt を付ける。255 バイトを超えるときは幹を切る。"""
     stem = Path(video_name).name
     stem = Path(stem).stem.replace('"', "").replace("\r", "").replace("\n", "").strip()
     if not stem or stem in {".", ".."} or "/" in stem or "\\" in stem:
         stem = "comments"
-    suffix = kind if kind.startswith(".") else f".{kind}"
-    return f"{stem}{suffix}"
+    room = _MAX_NAME_BYTES - len(COMMENT_EXPORT_SUFFIX.encode("utf-8"))
+    encoded = stem.encode("utf-8")
+    if len(encoded) > room:
+        stem = encoded[:room].decode("utf-8", errors="ignore").rstrip("._")
+    if not stem or stem in {".", ".."}:
+        stem = "comments"
+    return f"{stem}{COMMENT_EXPORT_SUFFIX}"
 
 
 def comment_sidecar_relatives(video_relative: str) -> list[str]:
+    """自動書き出しの SRT と、以前の JSONL / CSV / TXT を削除対象にする。"""
     path = Path(video_relative)
-    return [path.with_suffix(suffix).as_posix() for suffix in EXPORT_SUFFIXES]
+    parent = path.parent
+    names = [comment_export_name(path.name)]
+    names.extend(path.with_suffix(suffix).name for suffix in _LEGACY_EXPORT_SUFFIXES)
+    return [(parent / name).as_posix() for name in dict.fromkeys(names)]
 
 
 def segment_offset_ms(anchor: datetime, started_at: datetime) -> int:

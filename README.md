@@ -8,7 +8,7 @@ TikTok LIVE とツイキャスの公開配信を監視し、録画と視聴者�
 - 配信開始と終了の検知
 - Streamlink、yt-dlp、TikTokLive + FFmpeg による TikTok 録画
 - ツイキャス公式 API の `hls_url` を優先した録画
-- コメントの検索と JSONL / CSV / TXT 書き出し
+- コメントの検索と、録画に合わせた SRT 字幕の書き出し
 - NAS 再起動後の監視再開と、録画中断区間の記録
 
 ## 起動
