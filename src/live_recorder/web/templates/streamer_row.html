@@ -1,7 +1,8 @@
 {% import "components/ui.html" as ui with context %}
 {% set order = order|default('default') %}
 {%- set live_code = streamer_live_code(row) -%}
-<tr id="streamer-{{ row.id }}" data-search="{{ row.display_name }} {{ row.user_id }} {{ row.platform|platform_label }}"{% if not row.monitoring_enabled %} class="is-muted"{% endif %}>
+{%- set account = row.user_id if (row.user_id or '')[:1] == '@' else '@' ~ row.user_id -%}
+<tr id="streamer-{{ row.id }}" data-search="{{ row.display_name }} {{ account }} {{ row.platform|platform_label }}"{% if not row.monitoring_enabled %} class="is-muted"{% endif %}>
   <td class="is-who is-fill">
     <div class="c-streamer">
       {% if order == "custom" %}
@@ -12,7 +13,7 @@
         <span class="c-streamer__name u-truncate" title="{{ row.display_name }}">{{ row.display_name }}</span>
         <span class="c-streamer__meta">
           {{ ui.platform(row.platform) }}
-          <span class="c-streamer__id u-truncate" title="{{ row.user_id }}">{{ row.user_id }}</span>
+          <span class="c-streamer__id u-truncate" title="{{ account }}">{{ account }}</span>
         </span>
       </div>
     </div>

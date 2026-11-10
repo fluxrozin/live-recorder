@@ -58,7 +58,7 @@
     </table>
     <div data-filter-empty hidden>{{ ui.empty("search", "該当する配信者はいません", "名前またはユーザーIDの一部で絞り込めます。", compact=True) }}</div>
   </div>
-  <p class="c-card__footer"><span class="u-row u-row--wrap">{{ ui.poll_status(rendered_at, tz) }}<span>{{ ui.icon("info", "sm") }}スイッチは即時に保存されます。</span></span></p>
+  <p class="c-card__footer"><span class="u-row u-row--wrap">{{ ui.poll_status(rendered_at, tz) }}<span class="c-freshness">{{ ui.icon("info", "sm") }}スイッチは即時に保存されます。</span></span></p>
   {% else %}
   {% call ui.empty("radio-tower", "配信者はまだ登録されていません", "TikTok LIVE または Twitcasting のアカウントを登録すると、配信開始を検知して自動で録画します。") %}
     <button type="button" class="c-btn c-btn--primary" data-dialog-open="add-streamer">{{ ui.icon("plus") }}配信者を追加</button>

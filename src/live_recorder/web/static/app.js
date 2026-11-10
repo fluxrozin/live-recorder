@@ -522,14 +522,35 @@
     }
     source = event.detail.requestConfig && event.detail.requestConfig.elt;
     if (source && source.hasAttribute && source.hasAttribute("data-toggle") && xhr.status === 200) {
+      var previous = source.querySelector("[role='switch']");
       pendingToggle = {
         rowId: source.getAttribute("data-row"),
         field: source.getAttribute("data-field"),
         label: source.getAttribute("data-label"),
         name: source.getAttribute("data-name"),
+        wasOn: !!(previous && previous.getAttribute("aria-checked") === "true"),
       };
     }
   });
+
+  /* 行の差し替えで新しいスイッチは最初から切り替わった状態になる。一度前の位置に戻してから滑らせる。 */
+  function animateSwitch(sw, wasOn) {
+    var next = sw.getAttribute("aria-checked") === "true";
+    if (next === wasOn) return;
+    var parts = sw.querySelectorAll(".c-switch__track, .c-switch__thumb");
+    var state = sw.querySelector(".c-switch__state");
+    parts.forEach(function (part) {
+      part.style.transition = "none";
+    });
+    sw.setAttribute("aria-checked", wasOn ? "true" : "false");
+    if (state) state.textContent = wasOn ? "ON" : "OFF";
+    if (parts[0]) parts[0].getBoundingClientRect();
+    parts.forEach(function (part) {
+      part.style.transition = "";
+    });
+    sw.setAttribute("aria-checked", next ? "true" : "false");
+    if (state) state.textContent = next ? "ON" : "OFF";
+  }
 
   doc.addEventListener("htmx:afterSettle", function (event) {
     var request = event.detail.requestConfig && event.detail.requestConfig.elt;
@@ -1199,6 +1220,11 @@
       restoreLiveState(doc.getElementById(pendingRestore.id), pendingRestore.state);
     }
     pendingRestore = null;
+    if (pendingToggle && source && source.hasAttribute && source.hasAttribute("data-toggle")) {
+      var row = doc.getElementById(pendingToggle.rowId);
+      var sw = row && row.querySelector('[data-field="' + pendingToggle.field + '"] [role="switch"]');
+      if (sw) animateSwitch(sw, pendingToggle.wasOn);
+    }
     var target = event.detail.target;
     var current = (target && target.id && doc.getElementById(target.id)) || target;
     if (current) initDialogs(current);

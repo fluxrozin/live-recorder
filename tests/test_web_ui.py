@@ -153,6 +153,8 @@ def test_toggle_forms_keep_htmx_contract():
     page = render_page("streamers.html", "normal")
     assert "監視を停止すると" not in page
     assert "スイッチは即時に保存されます。" in page
+    assert 'title="@streamer_1"' in page and ">@streamer_1</span>" in page
+    assert 'title="@caster_2"' in page and ">@caster_2</span>" in page
     assert "data-reorder-handle" not in page
     assert 'id="reorder-status"' in page
     assert fields == {"monitoring_enabled", "recording_enabled", "comments_enabled"}
