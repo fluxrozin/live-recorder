@@ -9,7 +9,7 @@ Browser
   worker
        -> PostgreSQL
        -> Recordings volume
-       -> TikTokLive is_live / CommentEvent
+       -> TikTok room API / CommentEvent
        -> Streamlink / yt-dlp / FFmpeg
        -> TwitCasting API v2
   transcriber
@@ -70,6 +70,6 @@ Browser
 
 ## 外部サービス
 
-TikTok の配信有無 (`is_live`) は署名サービスを使いません。コメント受信と、第3手段の TikTokLive 録画は、ライブラリ既定の Euler Stream (`https://api.eulerstream.com`) へ署名要求を送ります。送るのはルーム解決に必要な識別子と User-Agent、設定している場合の API キーです。`sessionid` は送りません。CAPTCHA 解決 API は呼びません。
+TikTok の配信有無は署名サービスを使いません。確認は1人ずつ行い、空応答や HTTP 403 のときは数分まとめて休止します。コメント受信と、第3手段の TikTokLive 録画は、ライブラリ既定の Euler Stream (`https://api.eulerstream.com`) へ署名要求を送ります。送るのはルーム解決に必要な識別子と User-Agent、設定している場合の API キーです。`sessionid` は送りません。CAPTCHA 解決 API は呼びません。
 
 ツイキャスは公式 API です。Client ID と Client Secret の Basic 認証、または Bearer トークンを使います。パスワード配信の合言葉は渡しません。

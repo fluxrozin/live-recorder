@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from live_recorder.domain.enums import LiveStatus
 from live_recorder.platforms.normalize import normalize_tiktok
@@ -11,6 +12,12 @@ from live_recorder.platforms.types import CommentDraft, LiveObservation
 from live_recorder.timeutil import parse_platform_time, utcnow
 
 log = logging.getLogger(__name__)
+
+ROOM_URL = "https://www.tiktok.com/api-live/user/room/"
+# 5人を同時に叩くと空の 403 が返る。1人ずつ間を空ける。
+TIKTOK_CHECK_GAP_SECONDS = 1.5
+# 拒否されたあと同じ出口へすぐ戻すと、また全員が 403 になる。
+TIKTOK_BLOCK_SECONDS = 300
 
 
 async def lookup_room(user_id: str, *, timeout: float = 5) -> dict[str, Any] | None:
@@ -43,22 +50,114 @@ async def lookup_room(user_id: str, *, timeout: float = 5) -> dict[str, Any] | N
         return None
 
 
+def pauses_tiktok_polling(error: str | None) -> bool:
+    """空応答や出口の拒否は配信者個人の問題ではない。"""
+    if error == "invalid_json":
+        return True
+    if not error or not error.startswith("http_"):
+        return False
+    raw = error.removeprefix("http_")
+    if not raw.isdigit():
+        return False
+    code = int(raw)
+    return code in {403, 429} or code >= 500
+
+
+def _room_observation(body: Any) -> LiveObservation:
+    if isinstance(body, dict) and body.get("message") == "user_not_found":
+        return LiveObservation(status=LiveStatus.ERROR, error="user_not_found")
+    data = body.get("data") if isinstance(body, dict) else None
+    room = data.get("liveRoom") if isinstance(data, dict) else None
+    status = room.get("status") if isinstance(room, dict) else None
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return LiveObservation(status=LiveStatus.ERROR, error="invalid_response")
+    if code != 4:
+        return LiveObservation(status=LiveStatus.LIVE)
+    return LiveObservation(status=LiveStatus.OFFLINE)
+
+
 async def check_tiktok(user_id: str, *, client: Any | None = None, timeout: float = 30) -> LiveObservation:
+    """配信有無。is_live() は空の 403 を JSONDecodeError に変えてしまうので、ステータスを先に見る。"""
     normalized = normalize_tiktok(user_id)
     if client is None:
         from TikTokLive import TikTokLiveClient
 
         client = TikTokLiveClient(unique_id=normalized)
     try:
-        live = await asyncio.wait_for(client.is_live(), timeout)
+        response = await asyncio.wait_for(
+            client.web.get(
+                url=ROOM_URL,
+                extra_params={"uniqueId": normalized, "sourceType": 54},
+            ),
+            timeout,
+        )
     except TimeoutError:
         return LiveObservation(status=LiveStatus.ERROR, error="is_live timed out")
     except Exception as exc:
-        log.info("tiktok is_live failed for %s: %s", normalized, type(exc).__name__)
+        log.info("tiktok check failed for %s: %s", normalized, type(exc).__name__)
         return LiveObservation(status=LiveStatus.ERROR, error=type(exc).__name__)
-    if live:
-        return LiveObservation(status=LiveStatus.LIVE)
-    return LiveObservation(status=LiveStatus.OFFLINE)
+    if response.status_code != 200:
+        log.info("tiktok check failed for %s: http_%s", normalized, response.status_code)
+        return LiveObservation(status=LiveStatus.ERROR, error=f"http_{response.status_code}")
+    if not response.content:
+        log.info("tiktok check failed for %s: empty body", normalized)
+        return LiveObservation(status=LiveStatus.ERROR, error="invalid_json")
+    try:
+        body = response.json()
+    except ValueError:
+        log.info("tiktok check failed for %s: invalid json", normalized)
+        return LiveObservation(status=LiveStatus.ERROR, error="invalid_json")
+    return _room_observation(body)
+
+
+class TikTokChecks:
+    """TikTok の配信確認を1本に並べ、拒否されたら全員分を止める。"""
+
+    def __init__(
+        self,
+        *,
+        gap: float = TIKTOK_CHECK_GAP_SECONDS,
+        block_seconds: float = TIKTOK_BLOCK_SECONDS,
+        client_factory: Callable[[str], Any] | None = None,
+    ) -> None:
+        self.gap = gap
+        self.block_seconds = block_seconds
+        self._client_factory = client_factory
+        self._lock = asyncio.Lock()
+        self._clients: dict[str, Any] = {}
+        self._not_before = 0.0
+        self._blocked_until = 0.0
+
+    def block_remaining(self) -> float:
+        return max(0.0, self._blocked_until - time.monotonic())
+
+    def _client(self, user_id: str) -> Any:
+        client = self._clients.get(user_id)
+        if client is None:
+            if self._client_factory is not None:
+                client = self._client_factory(user_id)
+            else:
+                from TikTokLive import TikTokLiveClient
+
+                client = TikTokLiveClient(unique_id=user_id)
+            self._clients[user_id] = client
+        return client
+
+    async def check(self, user_id: str) -> LiveObservation:
+        async with self._lock:
+            now = time.monotonic()
+            if now < self._blocked_until:
+                return LiveObservation(status=LiveStatus.ERROR, error="http_403")
+            wait = self._not_before - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            observation = await check_tiktok(user_id, client=self._client(user_id))
+            self._not_before = time.monotonic() + self.gap
+            if pauses_tiktok_polling(observation.error):
+                self._blocked_until = time.monotonic() + self.block_seconds
+            return observation
 
 
 def comment_from_event(event: Any, received_at: datetime | None = None) -> CommentDraft | None:

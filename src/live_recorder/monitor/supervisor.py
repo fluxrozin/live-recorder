@@ -18,7 +18,7 @@ from live_recorder.db.session import Database
 from live_recorder.domain.enums import CommentJobStatus, LiveStatus, RecordingStatus
 from live_recorder.monitor.jobs import close_recording_if_idle, run_comment_job, run_recording_job
 from live_recorder.monitor.planner import effective_interval, plan_observation
-from live_recorder.platforms.tiktok import check_tiktok
+from live_recorder.platforms.tiktok import TikTokChecks
 from live_recorder.platforms.twitcasting import TwitCastingClient
 from live_recorder.platforms.types import LiveObservation
 from live_recorder.recording.files import resolve_stored
@@ -55,7 +55,7 @@ class Supervisor:
         self.locks: dict[int, asyncio.Lock] = {}
         self.next_ok: dict[int, float] = {}
         self.failures: dict[int, int] = {}
-        self.pollers: dict[str, object] = {}
+        self.tiktok = TikTokChecks()
         self.disk_low = False
         self.worker_id = f"{socket.gethostname()}-{os.getpid()}"
         self.warning = ""
@@ -212,7 +212,10 @@ class Supervisor:
                 self.failures[streamer_id] = self.failures.get(streamer_id, 0) + 1
                 from live_recorder.monitor.planner import backoff_seconds
 
-                self.next_ok[streamer_id] = time.monotonic() + backoff_seconds(self.failures[streamer_id])
+                delay = backoff_seconds(self.failures[streamer_id])
+                if platform == "tiktok":
+                    delay = max(delay, self.tiktok.block_remaining())
+                self.next_ok[streamer_id] = time.monotonic() + delay
             else:
                 self.failures[streamer_id] = 0
             free = disk_free(self.settings.recordings_dir)
@@ -240,13 +243,7 @@ class Supervisor:
 
     async def observe(self, platform: str, user_id: str) -> LiveObservation:
         if platform == "tiktok":
-            client = self.pollers.get(user_id)
-            if client is None:
-                from TikTokLive import TikTokLiveClient
-
-                client = TikTokLiveClient(unique_id=user_id)
-                self.pollers[user_id] = client
-            return await check_tiktok(user_id, client=client)
+            return await self.tiktok.check(user_id)
         return await self.tc.current_live(user_id)
 
     async def apply(self, streamer_id: int, observation: LiveObservation, plan) -> None:
