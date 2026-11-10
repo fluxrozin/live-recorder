@@ -483,6 +483,16 @@
     var elt = event.detail.elt;
     if (!elt || !elt.hasAttribute) return;
     if (!elt.hasAttribute("data-poll") && !elt.hasAttribute("data-current-url")) return;
+    /* 絞り込みやページ番号は、今のページを取り直す更新にだけ載せる。
+       録画マークの /partials/recording-state まで差し替えると、ページ全体が
+       hidden の中に入り、同名のダイアログがモーダルのまま画面に出なくなる。 */
+    var requested = "";
+    try {
+      requested = new URL(event.detail.path, window.location.href).pathname;
+    } catch (err) {
+      return;
+    }
+    if (requested !== window.location.pathname) return;
     event.detail.path = window.location.pathname + window.location.search;
     var params = event.detail.parameters;
     if (params) {
