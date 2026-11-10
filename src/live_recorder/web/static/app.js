@@ -791,6 +791,15 @@
     applySegFilter(button.closest("[data-seg-filter]"), button.getAttribute("data-value"));
   });
 
+  function syncFavicon() {
+    var link = doc.getElementById("favicon");
+    var mark = doc.getElementById("app-mark");
+    if (!link || !mark) return;
+    var on = mark.getAttribute("data-recording") === "on";
+    var next = link.getAttribute(on ? "data-recording" : "data-idle");
+    if (next && link.getAttribute("href") !== next) link.setAttribute("href", next);
+  }
+
   /* ===== Init ===== */
   function init() {
     initTheme();
@@ -805,6 +814,7 @@
     var focusTarget = $("[data-scroll-into-view]");
     if (focusTarget) focusTarget.scrollIntoView({ block: "start" });
     tickElapsed();
+    syncFavicon();
   }
 
   doc.addEventListener("htmx:afterSwap", function (event) {
@@ -819,6 +829,7 @@
     if (current) initDialogs(current);
     initTabs(doc);
     tickElapsed();
+    syncFavicon();
   });
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", init);

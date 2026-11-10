@@ -18,10 +18,14 @@
 {%- for group_id, group, items in NAV_GROUPS -%}{%- for key, href, label, icon_name in items -%}{%- if key == active -%}{{ group }}|{{ label }}|{{ href }}{%- endif -%}{%- endfor -%}{%- endfor -%}
 {%- endmacro %}
 
+{% macro app_mark(recording_active, mark_id, oob=False) -%}
+<span id="{{ mark_id }}" class="c-logo{% if mark_id == 'app-mark-bar' %} l-topbar__mark{% endif %}{% if recording_active %} is-recording{% endif %}" data-recording="{{ 'on' if recording_active else 'off' }}" role="img" aria-label="{{ '録画中' if recording_active else '待機中' }}"{% if oob %} hx-swap-oob="outerHTML"{% endif %}><span class="c-logo__dot"></span></span>
+{%- endmacro %}
+
 {% macro sidebar(active) -%}
 <aside class="l-sidebar" id="sidebar" aria-label="サイドバー">
   <div class="l-sidebar__brand">
-    <span class="c-logo" aria-hidden="true"><span class="c-logo__dot"></span></span>
+    {{ app_mark(recording_active|default(false), "app-mark") }}
     <span class="l-sidebar__brand-text">
       <span class="l-sidebar__brand-name">Live Recorder</span>
       <span class="l-sidebar__brand-sub">Operations Console</span>
@@ -61,6 +65,7 @@
       {{ ui.csrf_input() }}
       <button type="submit" class="c-btn c-btn--ghost c-btn--block">{{ ui.icon("log-out") }}<span>ログアウト</span></button>
     </form>
+    <div id="recording-state-poll" hidden hx-get="/partials/recording-state" hx-trigger="every 30s, lr:refresh" hx-swap="innerHTML" data-poll="30"></div>
   </div>
 </aside>
 <div class="l-sidebar-backdrop" id="sidebar-backdrop" data-drawer-close hidden></div>
@@ -70,7 +75,7 @@
 {%- set found = nav_lookup(active).split("|") -%}
 <header class="l-topbar">
   <button type="button" class="c-icon-btn l-topbar__menu" data-drawer-open aria-controls="sidebar" aria-expanded="false" aria-label="メニューを開く">{{ ui.icon("menu") }}</button>
-  <span class="l-topbar__brand">Live Recorder</span>
+  <span class="l-topbar__brand">{{ app_mark(recording_active|default(false), "app-mark-bar") }}Live Recorder</span>
   <nav class="c-breadcrumb" aria-label="現在地">
     {% if found|length == 3 %}
     <span>{{ found[0] }}</span>

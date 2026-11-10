@@ -143,6 +143,14 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
   background: currentColor;
   box-shadow: 0 0 0 3px rgb(255 255 255 / 0.28);
 }
+.c-logo.is-recording { background: var(--live); }
+.c-logo.is-recording .c-logo__dot { animation: lr-record 1.4s ease-in-out infinite; }
+.l-topbar__mark { display: none; }
+
+@keyframes lr-record {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
 
 .c-nav { display: flex; flex-direction: column; gap: var(--sp-5); }
 .c-nav__group-label {
@@ -1582,7 +1590,8 @@ tr.is-muted .c-streamer__name { color: var(--text-secondary); }
 
 @media (max-width: 767px) {
   :root { --control-height: 40px; }
-  .l-topbar__brand { display: block; }
+  .l-topbar__brand { display: flex; align-items: center; gap: var(--sp-2); }
+  .l-topbar__mark { display: grid; }
   .c-breadcrumb { display: none; }
   .l-content { padding: var(--sp-5) var(--sp-4) var(--sp-12); gap: var(--sp-5); }
   .c-page-header { align-items: stretch; }

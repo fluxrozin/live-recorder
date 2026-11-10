@@ -104,6 +104,25 @@ def test_shell_has_navigation_and_logout(name):
     assert 'hx-headers=\'{"X-CSRF-Token": "test-csrf-token"}\'' in html
 
 
+def test_recording_mark_follows_active_recordings():
+    idle = render_page("dashboard.html", "normal")
+    assert 'id="favicon"' in idle
+    assert 'data-idle="' in idle and "favicon-recording.svg" in idle
+    assert 'id="app-mark"' in idle and 'data-recording="off"' in idle
+    assert 'aria-label="待機中"' in idle
+    assert "is-recording" not in idle
+    assert 'id="recording-state-poll"' in idle
+    context = fx.dashboard_context("normal")
+    context["recording_active"] = True
+    live = render("dashboard.html", context)
+    assert 'class="c-logo is-recording"' in live
+    assert 'data-recording="on"' in live
+    assert 'aria-label="録画中"' in live
+    partial = render("partials/recording_state.html", fx.base_context(recording_active=True))
+    assert partial.count('hx-swap-oob="outerHTML"') == 2
+    assert 'id="app-mark"' in partial and 'id="app-mark-bar"' in partial
+
+
 def test_login_page_has_no_shell():
     html = render_page("login.html", "stress")
     assert 'id="sidebar"' not in html
@@ -499,9 +518,11 @@ def test_live_pages_refresh_without_settings_or_login():
         assert 'data-poll="30"' in html
         assert 'hx-trigger="every 30s, lr:refresh"' in html
         assert "30秒ごと" in html
-    assert "data-poll" not in render_page("settings.html", "normal")
     assert "data-poll" not in render_page("login.html", "normal")
-    assert "data-poll" not in render_page("streamer_form.html", "normal")
+    for name in ("settings.html", "streamer_form.html"):
+        html = render_page(name, "normal")
+        assert 'id="recording-state-poll"' in html
+        assert html.count('data-poll="30"') == 1
     system = render("system.html", fx.system_context("normal", with_report=True))
 
     class _Nest(HTMLParser):
@@ -650,5 +671,6 @@ def test_existing_routes_are_kept(tmp_path):
         ("GET", "/system"),
         ("POST", "/system/scan"),
         ("GET", "/partials/active-sessions"),
+        ("GET", "/partials/recording-state"),
     }
     assert expected <= routes

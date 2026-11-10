@@ -190,9 +190,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "tz": tz,
             "username": request.session.get("username"),
             "rendered_at": utcnow(),
+            "recording_active": await _recording_active(request),
             **extra,
         }
         return templates.TemplateResponse(request, name, context, status_code=status_code)
+
+    async def _recording_active(request: Request) -> bool:
+        try:
+            async with request.app.state.db.session() as session:
+                return await Repository(session).count_active_recordings() > 0
+        except Exception:
+            return False
 
     async def require_user(request: Request) -> RedirectResponse | None:
         uid = request.session.get("uid")
@@ -313,6 +321,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             active=active,
             worker=worker,
         )
+
+    @app.get("/partials/recording-state", response_class=HTMLResponse)
+    async def recording_state_partial(request: Request):
+        blocked = await require_user(request)
+        if blocked:
+            return blocked
+        return await render(request, "partials/recording_state.html")
 
     @app.get("/streamers", response_class=HTMLResponse)
     async def streamers_page(request: Request):
