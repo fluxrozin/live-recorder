@@ -33,7 +33,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1
 
 `windows\tray\build` に `LiveRecorderTray.exe` ができます。このフォルダを Windows 側の任意の場所へ置きます。プロジェクトのファイルと `.env` は WSL 内の `project` に残します。
 
-exe と同じフォルダへ [windows/tray/tray.example.json](windows/tray/tray.example.json) を `tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。`LiveRecorderTray.exe` を起動するとトレイに入ります。
+exe と同じフォルダへ [windows/tray/tray.example.json](windows/tray/tray.example.json) を `tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。
+
+`LiveRecorderTray.exe` には発行元の署名がありません。起動時に SmartScreen が「Windows によって PC が保護されました」と出すことがあります。プロパティ下部に「許可する」があればオンにします。ダイアログでは「詳細情報」を開き、「実行」を選びます。同じ exe では、その後は表示されません。
 
 トレイを開くと `docker compose up -d` を実行します。Docker がまだ受け付けないときは、5 秒ごとの確認で起動をやり直します。「起動」は同じコマンドです。「停止」は `docker compose stop` で、トレイは残ります。やり直しは「停止」でやめられます。「再構築」は `docker compose up -d --build` です。失敗しても自動ではやり直しません。待ちは 30 分です。録画中のセグメントは、停止や再構築でコンテナが止まると、ワーカーが最大 30 秒で区切ります。再構築と「停止して終了」は、録画中なら確認してから実行します。「停止して終了」は `docker compose down` が終わってからアイコンを消します。データベースと録画ファイルは残ります。プロセスを強制終了したときは、コンテナは動き続けます。
 
