@@ -245,6 +245,10 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 }
 .l-content:focus { outline: none; }
 
+/* 定期更新の枠は箱を作らない。ブロック間隔は .l-content の gap のままにする */
+[data-poll],
+.c-live { display: contents; }
+
 /* ===== Page header ===== */
 .c-page-header {
   display: flex;
@@ -274,6 +278,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 }
 .c-freshness { display: inline-flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-caption); color: var(--text-tertiary); white-space: nowrap; }
 .c-freshness.is-stale { color: var(--warning); }
+.c-freshness.htmx-request { color: var(--accent); }
 
 /* ===== Button ===== */
 .c-btn {

@@ -263,7 +263,11 @@ class Supervisor:
                 streamer.last_live_at = utcnow()
             open_session = await repo.open_session(streamer_id)
             if plan.session in {"end", "replace"} and open_session is not None:
-                await self._end_session(repo, open_session.id)
+                await self._end_session(
+                    repo,
+                    open_session.id,
+                    cancel=plan.live_status == LiveStatus.DISABLED and observation.status == LiveStatus.LIVE,
+                )
                 open_session = None if plan.session == "replace" else await repo.get_session(open_session.id)
             if plan.session in {"open", "replace"} and observation.status == LiveStatus.LIVE:
                 created = await repo.create_session(
@@ -308,7 +312,7 @@ class Supervisor:
         if session_id and start_comments:
             await self._ensure_comments(session_id)
 
-    async def _end_session(self, repo: Repository, session_id: int) -> None:
+    async def _end_session(self, repo: Repository, session_id: int, *, cancel: bool) -> None:
         stream = await repo.get_session(session_id)
         if stream is None or stream.status == "ENDED":
             return
@@ -316,18 +320,27 @@ class Supervisor:
         com = await repo.active_comments(session_id)
         stream.status = "ENDED"
         stream.ended_detected_at = utcnow()
-        if rec is not None:
+        if cancel and rec is not None:
             rec.cancel_requested = True
-        if com is not None:
+        if cancel and com is not None:
             com.cancel_requested = True
-        await repo.add_event("live_ended", "配信終了を検知しました", session_id=session_id)
+        await repo.add_event(
+            "live_ended",
+            "監視を停止したため収集を終了します" if cancel else "配信終了を検知しました",
+            session_id=session_id,
+        )
         if rec is not None:
             event = self.events.get(("rec", rec.id))
             if event is not None:
                 event.set()
             elif rec.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
-                target = RecordingStatus.PARTIAL if await repo.any_valid_segment(rec.id) else RecordingStatus.FAILED
-                repo.finish_recording(rec, target, "stream ended")
+                if cancel:
+                    target = RecordingStatus.CANCELLED
+                    reason = "monitoring disabled"
+                else:
+                    target = RecordingStatus.PARTIAL if await repo.any_valid_segment(rec.id) else RecordingStatus.FAILED
+                    reason = "stream ended"
+                repo.finish_recording(rec, target, reason)
         if com is not None:
             event = self.events.get(("com", com.id))
             if event is not None:

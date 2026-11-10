@@ -14,6 +14,8 @@
 
 <section class="c-card" aria-labelledby="streamers-title">
   <h2 class="u-sr-only" id="streamers-title">配信者一覧</h2>
+  <div {{ ui.live_poll("streamers-poll", "streamers-live", "/streamers") }}>
+  <div id="streamers-live" class="c-live">
   {% if rows %}
   <div class="c-toolbar">
     <p class="c-toolbar__summary">
@@ -48,12 +50,15 @@
     </table>
     <div data-filter-empty hidden>{{ ui.empty("search", "該当する配信者はいません", "名前またはユーザーIDの一部で絞り込めます。", compact=True) }}</div>
   </div>
-  <p class="c-card__footer">{{ ui.icon("info", "sm") }}スイッチは即時に保存されます。監視を停止すると、その配信者の状態は「監視停止」になります。</p>
+  <p class="c-card__footer"><span class="u-row u-row--wrap">{{ ui.poll_status(rendered_at, tz) }}<span>{{ ui.icon("info", "sm") }}スイッチは即時に保存されます。監視を停止すると、その配信者の状態は「監視停止」になります。</span></span></p>
   {% else %}
-  {% call ui.empty("radio-tower", "配信者はまだ登録されていません", "TikTok LIVE またはツイキャスのアカウントを登録すると、配信開始を検知して自動で録画します。") %}
+  {% call ui.empty("radio-tower", "配信者はまだ登録されていません", "TikTok LIVE または Twitcasting のアカウントを登録すると、配信開始を検知して自動で録画します。") %}
     <button type="button" class="c-btn c-btn--primary" data-dialog-open="add-streamer">{{ ui.icon("plus") }}配信者を追加</button>
   {% endcall %}
+  <p class="c-card__footer">{{ ui.poll_status(rendered_at, tz) }}</p>
   {% endif %}
+  </div>
+  </div>
 </section>
 
 {%- set form = add_form or {"platform": "tiktok", "account": "", "display_name": "", "monitoring_enabled": True, "recording_enabled": True, "comments_enabled": True} -%}
@@ -73,10 +78,10 @@
       <fieldset class="c-field">
         <legend class="c-label">プラットフォーム</legend>
         <div class="c-segmented c-segmented--block">
-          {% for code, label in [("tiktok", "TikTok"), ("twitcasting", "ツイキャス")] %}
+          {% for code in ("tiktok", "twitcasting") %}
           <span class="c-segmented__item">
             <input type="radio" name="platform" value="{{ code }}" id="add-platform-{{ code }}"{% if form.platform == code or (code == "tiktok" and form.platform not in ("tiktok", "twitcasting")) %} checked{% endif %} required>
-            <label class="c-segmented__label" for="add-platform-{{ code }}">{{ ui.icon("music-2" if code == "tiktok" else "cast", "sm") }}{{ label }}</label>
+            <label class="c-segmented__label" for="add-platform-{{ code }}">{{ ui.icon("music-2" if code == "tiktok" else "cast", "sm") }}{{ code|platform_label }}</label>
           </span>
           {% endfor %}
         </div>
@@ -84,7 +89,7 @@
       <div class="c-field">
         <label class="c-label" for="add-account">ユーザーID または URL</label>
         <input class="c-input c-input--mono" id="add-account" name="account" value="{{ form.account }}" required autocomplete="off" spellcheck="false" placeholder="@username またはプロフィールURL" aria-describedby="add-account-hint{% if field_error %} add-account-error{% endif %}"{% if field_error %} aria-invalid="true" autofocus{% else %} autofocus{% endif %}>
-        <p class="c-hint" id="add-account-hint">TikTok は「@名前」「ユーザー名」「プロフィールまたは /live の URL」、ツイキャスは「ユーザーID」「twitcasting.tv の URL」を入力できます。</p>
+        <p class="c-hint" id="add-account-hint">TikTok は「@名前」「ユーザー名」「プロフィールまたは /live の URL」、Twitcasting は「ユーザーID」「twitcasting.tv の URL」を入力できます。</p>
         {{ ui.field_error("add-account-error", field_error) }}
       </div>
       <div class="c-field">

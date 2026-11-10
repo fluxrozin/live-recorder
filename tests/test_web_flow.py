@@ -93,6 +93,16 @@ async def _seed(settings) -> dict:
                 stream_session_id=stream.id,
                 platform_user_id="viewer",
                 nickname="視聴者",
+                message="古いコメント",
+                received_at=now - timedelta(minutes=10),
+                dedupe_key="k0",
+            )
+        )
+        session.add(
+            Comment(
+                stream_session_id=stream.id,
+                platform_user_id="viewer",
+                nickname="視聴者",
                 message=XSS,
                 received_at=now,
                 dedupe_key="k1",
@@ -167,6 +177,10 @@ def test_pages_render_with_real_data(client):
     assert detail.count("/download") == 1, "保存されているセグメントだけダウンロードできる"
     comments = client.get("/comments").text
     assert XSS not in comments and "&lt;script&gt;" in comments
+    assert comments.index("&lt;script&gt;") < comments.index("古いコメント")
+    exported = client.get("/comments/export?format=txt")
+    assert exported.status_code == 200
+    assert exported.text.index("古いコメント") < exported.text.index("<script>")
 
 
 def test_streamer_lifecycle(client):

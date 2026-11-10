@@ -105,7 +105,7 @@ def effective_interval(configured: int, twitcasting_count: int) -> tuple[int, st
     minimum = math.ceil(twitcasting_count * 2 / 50 * 60)
     minimum = max(30, minimum)
     if interval < minimum:
-        return minimum, f"ツイキャスのレート制限のため間隔を{minimum}秒に広げました"
+        return minimum, f"Twitcasting のレート制限のため間隔を{minimum}秒に広げました"
     return interval, None
 
 

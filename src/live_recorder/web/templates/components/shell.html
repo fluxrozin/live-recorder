@@ -85,6 +85,6 @@
     {% endif %}
     {% endif %}
   </nav>
-  <div class="l-topbar__meta">{{ ui.freshness(rendered_at, tz) }}</div>
+  <div class="l-topbar__meta" id="topbar-freshness">{{ ui.freshness(rendered_at, tz) }}</div>
 </header>
 {%- endmacro %}

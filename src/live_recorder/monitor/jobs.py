@@ -20,7 +20,7 @@ from live_recorder.db.session import Database
 from live_recorder.domain.enums import CommentJobStatus, RecordingStatus
 from live_recorder.monitor.planner import backoff_seconds
 from live_recorder.platforms.normalize import tiktok_live_url
-from live_recorder.platforms.tiktok import comment_from_event, room_fields
+from live_recorder.platforms.tiktok import comment_from_event, lookup_room, room_fields
 from live_recorder.platforms.twitcasting import TwitCastingClient
 from live_recorder.platforms.types import CommentDraft
 from live_recorder.recording.commands import (
@@ -34,12 +34,11 @@ from live_recorder.recording.files import build_segment_path, relative_to_root, 
 from live_recorder.recording.finalize import finalize_recording
 from live_recorder.recording.policy import (
     ACCESS_DENIED,
-    ENDED,
     INTERRUPTED,
     OFFLINE,
-    STOPPED,
     classify_output,
     next_action,
+    recording_result,
 )
 from live_recorder.recording.process import run_process
 from live_recorder.timeutil import utcnow
@@ -174,7 +173,6 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             session_id = stream.id
             platform = streamer.platform
             user_id = streamer.platform_user_id
-            stream_key = stream.platform_stream_id
             if job.started_at is None:
                 job.started_at = utcnow()
             if job.status == RecordingStatus.PENDING.value:
@@ -185,6 +183,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
         attempt = 0
         engine_index = 0
         last_kind = INTERRUPTED
+        title_lookup_done = False
         while not stop.is_set() and order:
             from live_recorder.recording.finalize import allow_new_recording, disk_free
 
@@ -193,6 +192,8 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                 last_kind = INTERRUPTED
                 break
             engine = order[min(engine_index, len(order) - 1)]
+            need_title = False
+            opened = False
             async with db.session() as session:
                 repo = Repository(session)
                 job = await repo.get_recording_job(job_id)
@@ -203,26 +204,43 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     pass
                 elif job.status == RecordingStatus.RECONNECTING.value:
                     repo.move_recording(job, RecordingStatus.STARTING)
-                number = await repo.next_segment_number(job_id)
-                now = utcnow()
-                from zoneinfo import ZoneInfo
+                current = await repo.get_session(session_id)
+                title = current.title if current and current.title else None
+                need_title = platform == "tiktok" and not title and not title_lookup_done
+                if need_title:
+                    await session.commit()
+                else:
+                    number = await repo.next_segment_number(job_id)
+                    now = utcnow()
+                    from zoneinfo import ZoneInfo
 
-                local = now.astimezone(ZoneInfo(runtime.display_timezone))
-                path = build_segment_path(
-                    root=settings.recordings_dir,
-                    platform=platform,
-                    user_id=user_id,
-                    when_stamp=local.strftime("%Y%m%d_%H%M%S"),
-                    day=local.strftime("%Y-%m-%d"),
-                    stream_id=stream_key,
-                    segment_number=number,
-                )
-                relative = relative_to_root(settings.recordings_dir, path)
-                segment = await repo.add_segment(job_id, number, relative, now)
-                segment_id = segment.id
-                repo.move_recording(job, RecordingStatus.RECORDING)
-                job.recorder_engine = engine
-                await session.commit()
+                    local = now.astimezone(ZoneInfo(runtime.display_timezone))
+                    path = build_segment_path(
+                        root=settings.recordings_dir,
+                        platform=platform,
+                        user_id=user_id,
+                        when_stamp=local.strftime("%Y%m%d_%H%M%S"),
+                        day=local.strftime("%Y-%m-%d"),
+                        title=title,
+                        segment_number=number,
+                    )
+                    relative = relative_to_root(settings.recordings_dir, path)
+                    segment = await repo.add_segment(job_id, number, relative, now)
+                    segment_id = segment.id
+                    repo.move_recording(job, RecordingStatus.RECORDING)
+                    job.recorder_engine = engine
+                    await session.commit()
+                    opened = True
+            if need_title:
+                title_lookup_done = True
+                if settings.sign_api_key:
+                    os.environ["SIGN_API_KEY"] = settings.sign_api_key
+                info = await lookup_room(user_id)
+                if info is not None:
+                    await _remember_room(db, session_id, None, info)
+                continue
+            if not opened:
+                break
             outcome = await run_engine(
                 settings=settings,
                 name=engine,
@@ -319,16 +337,14 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                 for gap in gaps
                 if gap.job_type == "recording" and (job.started_at is None or gap.started_at >= job.started_at)
             ]
-            if job.cancel_requested:
-                target = RecordingStatus.CANCELLED
-            elif last_kind == ACCESS_DENIED and not has_media:
-                target = RecordingStatus.FAILED
-            elif has_media and not recording_gaps and last_kind in {ENDED, STOPPED, OFFLINE}:
-                target = RecordingStatus.COMPLETED
-            elif has_media:
-                target = RecordingStatus.PARTIAL
-            else:
-                target = RecordingStatus.FAILED
+            target = RecordingStatus(
+                recording_result(
+                    cancel_requested=job.cancel_requested,
+                    kind=last_kind,
+                    has_media=has_media,
+                    has_gaps=bool(recording_gaps),
+                )
+            )
             repo.finish_recording(job, target, None if target == RecordingStatus.COMPLETED else saw_failure)
             if stream is not None and has_media:
                 stream.streamer.last_recording_at = utcnow()

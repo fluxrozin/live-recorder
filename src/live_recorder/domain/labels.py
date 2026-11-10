@@ -39,5 +39,5 @@ COMMENT_STATUS_JA = {
 
 PLATFORM_JA = {
     "tiktok": "TikTok",
-    "twitcasting": "ツイキャス",
+    "twitcasting": "Twitcasting",
 }

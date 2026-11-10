@@ -9,7 +9,7 @@
   <meta name="color-scheme" content="dark light">
   <meta name="csrf-token" content="{{ csrf }}">
   <meta name="lr-icons" content="{{ static_url('icons.svg') }}">
-  <meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false,"historyCacheSize":0,"refreshOnHistoryMiss":true}'>
+  <meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false,"historyCacheSize":0,"refreshOnHistoryMiss":true,"ignoreTitle":true}'>
   <title>{% block title %}{% endblock %} · Live Recorder</title>
   <script src="{{ static_url('theme.js') }}"></script>
   <link rel="stylesheet" href="{{ static_url('fonts/fonts.css') }}">

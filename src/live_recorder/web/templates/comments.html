@@ -59,7 +59,7 @@
           <select class="c-select" id="f-platform" name="platform">
             <option value="">すべて</option>
             <option value="tiktok"{% if filters.platform == "tiktok" %} selected{% endif %}>TikTok</option>
-            <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>ツイキャス</option>
+            <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>{{ "twitcasting"|platform_label }}</option>
           </select>
         </div>
         <div class="c-field">
@@ -79,12 +79,14 @@
   </form>
 </section>
 
+<div {{ ui.live_poll("comments-poll", "results", url_with(request)) }}>
 <section class="c-card c-loading-region" id="results" aria-labelledby="results-title">
   <div class="c-toolbar">
     <h2 class="c-toolbar__summary" id="results-title" tabindex="-1" data-results-heading>
-      <span><strong>{{ "{:,}".format(total) }}</strong> 件{% if chips %}<span class="u-subtle">（検索結果）</span>{% endif %}</span>
+      <span><strong>{{ "{:,}".format(total) }}</strong> 件{% if chips %}<span class="u-subtle">（検索結果）</span>{% endif %}<span class="u-subtle">· 新しい順</span></span>
       {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
     </h2>
+    {{ ui.poll_status(rendered_at, tz) }}
     <span class="u-spacer"></span>
     {% if total %}
     {% call ui.menu_button("export-menu", "エクスポート", header=("現在の条件に一致する全 " if chips else "すべてのコメント ") ~ "{:,}".format(total) ~ " 件を出力します（表示中のページだけではありません）", icon_name="download") %}
@@ -123,4 +125,5 @@
   {{ ui.empty("message-square-text", "コメントはまだありません", "コメント収集が有効な配信者の配信中に、コメントが記録されます。") }}
   {% endif %}
 </section>
+</div>
 {% endblock %}

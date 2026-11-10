@@ -49,22 +49,22 @@ def tiktok_live_url(user_id: str) -> str:
 def normalize_twitcasting(raw: str) -> str:
     text = raw.strip()
     if not text or any(ord(ch) < 32 for ch in text):
-        raise NormalizeError("ツイキャスのユーザー指定が空です")
+        raise NormalizeError("Twitcasting のユーザー指定が空です")
     if "\\" in text or ".." in text.split("/"):
-        raise NormalizeError("不正なツイキャス指定です")
+        raise NormalizeError("不正な Twitcasting 指定です")
     if "://" in text or text.startswith("//"):
         parsed = urlparse(text if "://" in text else f"https:{text}")
         if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
-            raise NormalizeError("ツイキャスの URL が不正です")
+            raise NormalizeError("Twitcasting の URL が不正です")
         host = (parsed.hostname or "").lower()
         if host != "twitcasting.tv":
-            raise NormalizeError("ツイキャス以外のホストは指定できません")
+            raise NormalizeError("Twitcasting 以外のホストは指定できません")
         parts = [part for part in parsed.path.split("/") if part]
         if not parts:
-            raise NormalizeError("ツイキャスのユーザーIDがありません")
+            raise NormalizeError("Twitcasting のユーザーIDがありません")
         text = parts[0]
     if not _TWITCASTING_ID.fullmatch(text):
-        raise NormalizeError("ツイキャスのユーザーIDの形式が不正です")
+        raise NormalizeError("Twitcasting のユーザーIDの形式が不正です")
     return text
 
 

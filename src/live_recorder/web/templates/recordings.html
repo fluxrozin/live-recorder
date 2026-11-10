@@ -41,7 +41,7 @@
         <select class="c-select" id="f-platform" name="platform">
           <option value="">すべて</option>
           <option value="tiktok"{% if filters.platform == "tiktok" %} selected{% endif %}>TikTok</option>
-          <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>ツイキャス</option>
+          <option value="twitcasting"{% if filters.platform == "twitcasting" %} selected{% endif %}>{{ "twitcasting"|platform_label }}</option>
         </select>
       </div>
       <div class="c-filter-bar__actions">
@@ -63,12 +63,16 @@
     </details>
   </form>
 
+  <div {{ ui.live_poll("recordings-poll", "recording-results", url_with(request)) }}>
+  <div id="recording-results" class="c-live">
   <div class="c-toolbar">
     <h2 class="c-toolbar__summary" id="rec-results-title">
       <span><strong>{{ "{:,}".format(total) }}</strong> 件</span>
       {% if pages > 1 %}<span class="u-subtle">· {{ page }} / {{ pages }} ページ</span>{% endif %}
     </h2>
     {{ ui.filter_chips(chips, "/recordings") }}
+    <span class="u-spacer"></span>
+    {{ ui.poll_status(rendered_at, tz) }}
   </div>
 
   {% if cards %}
@@ -128,5 +132,7 @@
   {% else %}
   {{ ui.empty("film", "まだ録画履歴がありません", "監視中の配信者が配信を開始すると、自動で録画され、ここに表示されます。") }}
   {% endif %}
+  </div>
+  </div>
 </section>
 {% endblock %}

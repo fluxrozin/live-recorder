@@ -46,6 +46,15 @@
 <span class="c-freshness" title="{{ when|localtime(tz) }}">{{ icon("clock", "sm") }}{{ label }} <time datetime="{{ when|iso }}" class="u-num">{{ when|clock(tz) }}</time></span>
 {%- endmacro %}
 
+{# 30秒ごとの差し替え。外枠は残し、body_id の中身だけを現在のURLで取り直す。 #}
+{% macro live_poll(poll_id, body_id, url) -%}
+id="{{ poll_id }}" data-poll="30" hx-get="{{ url }}" hx-trigger="every 30s, lr:refresh" hx-select="#{{ body_id }}" hx-target="#{{ body_id }}" hx-swap="outerHTML ignoreTitle:true" hx-select-oob="#topbar-freshness:innerHTML" hx-indicator="find [data-poll-status]"
+{%- endmacro %}
+
+{% macro poll_status(when, tz) -%}
+<span class="c-freshness" id="poll-status" data-poll-status>{{ icon("clock", "sm") }}<span>更新 <time class="u-num" datetime="{{ when|iso }}">{{ when|clock(tz) }}</time> · 30秒ごと</span></span>
+{%- endmacro %}
+
 {% macro metric(label, value, icon_name, hint=None, state="") -%}
 <div class="c-metric{% if state %} is-{{ state }}{% endif %}">
   <div class="c-metric__label">{{ icon(icon_name) }}<span>{{ label }}</span></div>

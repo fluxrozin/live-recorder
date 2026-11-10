@@ -136,7 +136,7 @@
       {{ switch_setting("comments_globally_enabled", "コメント収集を有効にする", runtime.comments_globally_enabled, "OFF にすると、配信者ごとの設定にかかわらずコメントを収集しません。") }}
       {{ number_setting("comment_retention_days", "コメントの保存期限", runtime.comment_retention_days, "コメントを保存しておく日数です。0 は無期限です。", "日", min=0) }}
       {{ switch_setting("auto_export_on_complete", "完了時に自動エクスポート", runtime.auto_export_on_complete, "コメント収集が完了したとき、録画ファイルと同じ名前の JSONL をセグメントごとに書き出します。") }}
-      {{ number_setting("comment_poll_seconds", "ツイキャスのコメント取得間隔", runtime.comment_poll_seconds, "ツイキャス API からコメントを取得する間隔です（5〜120秒）。", "秒", min=5, max=120) }}
+      {{ number_setting("comment_poll_seconds", "Twitcasting のコメント取得間隔", runtime.comment_poll_seconds, "Twitcasting API からコメントを取得する間隔です（5〜120秒）。", "秒", min=5, max=120) }}
     </section>
 
     <section class="c-card" id="settings-advanced" role="tabpanel" aria-labelledby="settings-advanced-title">
@@ -164,7 +164,7 @@
         <dl class="c-props">
           <dt>録画保存先 <span class="c-tag">再起動が必要</span></dt><dd class="u-mono">{{ env.recordings_dir }}</dd>
           <dt>Webポート <span class="c-tag">再起動が必要</span></dt><dd class="u-num">{{ env.web_port }}</dd>
-          <dt>ツイキャス API 認証 <span class="c-tag">再起動が必要</span></dt>
+          <dt>Twitcasting API 認証 <span class="c-tag">再起動が必要</span></dt>
           <dd>{% if env.twitcasting %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
           <dt>TikTok 署名キー <span class="c-tag">再起動が必要</span></dt>
           <dd>{% if env.sign_key %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>

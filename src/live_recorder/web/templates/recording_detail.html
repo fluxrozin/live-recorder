@@ -3,6 +3,8 @@
 {% set crumbs = ["#" ~ detail.id] %}
 {% block title %}{{ detail.name }} の録画 #{{ detail.id }}{% endblock %}
 {% block content %}
+<div {{ ui.live_poll("recording-poll", "recording-live", "/recordings/" ~ detail.id) }}>
+<div id="recording-live" class="c-live">
 {%- set visible = detail.segments|rejectattr("removed")|list -%}
 {%- set missing = visible|rejectattr("exists")|list -%}
 {%- set total_size = visible|map(attribute="size")|reject("none")|sum -%}
@@ -26,6 +28,8 @@
   {{ ui.status("session", detail.status, badge=True) }}
   {{ ui.status("rec", detail.recording_status, badge=True) }}
   {{ ui.status("com", detail.comment_status, badge=True) }}
+  <span class="u-spacer"></span>
+  {{ ui.poll_status(rendered_at, tz) }}
 </div>
 
 {% if detail.recording_error %}
@@ -213,4 +217,6 @@
     {{ ui.impact("remove", "この録画セッションの履歴と欠損の記録") }}
   </div>
 {% endcall %}
+</div>
+</div>
 {% endblock %}

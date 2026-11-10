@@ -392,15 +392,110 @@
     }
   }
 
+  function isPoll(elt) {
+    return !!(elt && elt.hasAttribute && elt.hasAttribute("data-poll"));
+  }
+
+  function pollBody(elt) {
+    var target = elt.getAttribute("hx-target") || "";
+    if (target.charAt(0) === "#") return doc.getElementById(target.slice(1));
+    return elt;
+  }
+
+  /* 入力中・確認ダイアログ・操作メニューを、定期更新で消さない */
+  function interactionBlocked(elt) {
+    if (doc.querySelector("dialog[open]")) return true;
+    if (openMenuState) return true;
+    if (sidebar && sidebar.classList.contains("is-open")) return true;
+    var body = pollBody(elt);
+    var active = doc.activeElement;
+    if (
+      active &&
+      body &&
+      body.contains(active) &&
+      active.matches &&
+      active.matches("input, textarea, select, [contenteditable='true']")
+    ) {
+      return true;
+    }
+    var selection = window.getSelection && window.getSelection();
+    if (selection && !selection.isCollapsed && body && selection.anchorNode && body.contains(selection.anchorNode)) return true;
+    if (doc.querySelector("form.htmx-request, a.htmx-request, button.htmx-request")) return true;
+    return false;
+  }
+
+  function captureLiveState(root) {
+    if (!root) return null;
+    return {
+      scrollY: window.scrollY,
+      filters: $all("[data-filter-target]", root).map(function (input) {
+        return { id: input.id, value: input.value };
+      }),
+      segments: $all("[data-seg-filter]", root).map(function (group) {
+        var pressed = $("button[aria-pressed='true']", group);
+        return {
+          target: group.getAttribute("data-seg-filter"),
+          value: pressed ? pressed.getAttribute("data-value") : "all",
+        };
+      }),
+      details: $all("details[open]", root).map(function (el) {
+        var summary = $("summary", el);
+        return summary ? summary.textContent : "";
+      }),
+    };
+  }
+
+  function restoreLiveState(root, state) {
+    if (!root || !state) return;
+    state.filters.forEach(function (item) {
+      if (!item.id) return;
+      var input = doc.getElementById(item.id);
+      if (!input || !root.contains(input)) return;
+      input.value = item.value;
+      applyTextFilter(input);
+    });
+    state.segments.forEach(function (item) {
+      var group = $all("[data-seg-filter]", root).filter(function (el) {
+        return el.getAttribute("data-seg-filter") === item.target;
+      })[0];
+      if (!group) return;
+      $all("button[data-value]", group).forEach(function (button) {
+        button.setAttribute("aria-pressed", button.getAttribute("data-value") === item.value ? "true" : "false");
+      });
+      applySegFilter(group, item.value);
+    });
+    if (state.details.length) {
+      $all("details", root).forEach(function (el) {
+        var summary = $("summary", el);
+        var text = summary ? summary.textContent : "";
+        if (state.details.indexOf(text) !== -1) el.open = true;
+      });
+    }
+    if (window.scrollY !== state.scrollY) window.scrollTo(0, state.scrollY);
+  }
+
+  var pendingRestore = null;
+
   doc.addEventListener("htmx:configRequest", function (event) {
     var token = doc.querySelector('meta[name="csrf-token"]');
     if (token) event.detail.headers["X-CSRF-Token"] = token.content;
+    var elt = event.detail.elt;
+    if (!elt || !elt.hasAttribute) return;
+    if (!elt.hasAttribute("data-poll") && !elt.hasAttribute("data-current-url")) return;
+    event.detail.path = window.location.pathname + window.location.search;
+    var params = event.detail.parameters;
+    if (params) {
+      Object.keys(params).forEach(function (key) {
+        delete params[key];
+      });
+    }
   });
 
   doc.addEventListener("htmx:beforeRequest", function (event) {
     var elt = event.detail.elt;
-    if (elt && elt.hasAttribute && elt.hasAttribute("data-poll") && doc.visibilityState === "hidden") {
-      event.preventDefault();
+    if (isPoll(elt)) {
+      if (doc.visibilityState === "hidden" || interactionBlocked(elt)) event.preventDefault();
+      return;
     }
     closeMenu(false);
   });
@@ -415,6 +510,16 @@
       return;
     }
     var source = event.detail.requestConfig && event.detail.requestConfig.elt;
+    if (isPoll(source)) {
+      if (interactionBlocked(source)) {
+        event.detail.shouldSwap = false;
+        pendingRestore = null;
+      } else {
+        var live = event.detail.target;
+        pendingRestore = { id: live && live.id, state: captureLiveState(live) };
+      }
+    }
+    source = event.detail.requestConfig && event.detail.requestConfig.elt;
     if (source && source.hasAttribute && source.hasAttribute("data-toggle") && xhr.status === 200) {
       pendingToggle = {
         rowId: source.getAttribute("data-row"),
@@ -426,6 +531,7 @@
   });
 
   doc.addEventListener("htmx:afterSettle", function (event) {
+    var request = event.detail.requestConfig && event.detail.requestConfig.elt;
     if (pendingToggle) {
       var info = pendingToggle;
       pendingToggle = null;
@@ -439,7 +545,7 @@
       }
     }
     var target = event.detail.target;
-    if (target && target.id === "results") {
+    if (!isPoll(request) && target && target.id === "results") {
       var results = document.getElementById("results");
       if (results) {
         var heading = $("[data-results-heading]", results);
@@ -484,6 +590,7 @@
 
   doc.addEventListener("htmx:load", function (event) {
     initDialogs(event.detail.elt);
+    $all("button[type='submit']", event.detail.elt).forEach(syncAckButton);
   });
 
   doc.addEventListener("visibilitychange", function () {
@@ -662,14 +769,10 @@
     if (event.target.matches && event.target.matches("[data-filter-target]")) applyTextFilter(event.target);
   });
 
-  doc.addEventListener("click", function (event) {
-    var button = event.target.closest("[data-seg-filter] button[data-value]");
-    if (!button) return;
-    var group = button.closest("[data-seg-filter]");
+  function applySegFilter(group, value) {
     var target = doc.querySelector(group.getAttribute("data-seg-filter"));
-    var value = button.getAttribute("data-value");
     $all("button[data-value]", group).forEach(function (other) {
-      other.setAttribute("aria-pressed", other === button ? "true" : "false");
+      other.setAttribute("aria-pressed", other.getAttribute("data-value") === value ? "true" : "false");
     });
     if (!target) return;
     var shown = 0;
@@ -680,6 +783,12 @@
     });
     var empty = $("[data-filter-empty]", target.parentNode);
     if (empty) empty.hidden = shown !== 0;
+  }
+
+  doc.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-seg-filter] button[data-value]");
+    if (!button) return;
+    applySegFilter(button.closest("[data-seg-filter]"), button.getAttribute("data-value"));
   });
 
   /* ===== Init ===== */
@@ -699,10 +808,15 @@
   }
 
   doc.addEventListener("htmx:afterSwap", function (event) {
-    var target = event.detail.target;
-    if (target && target.hasAttribute && target.hasAttribute("data-poll")) {
-      target.setAttribute("data-poll-at", String(Date.now()));
+    var source = event.detail.requestConfig && event.detail.requestConfig.elt;
+    if (isPoll(source)) source.setAttribute("data-poll-at", String(Date.now()));
+    if (isPoll(source) && pendingRestore && pendingRestore.id) {
+      restoreLiveState(doc.getElementById(pendingRestore.id), pendingRestore.state);
     }
+    pendingRestore = null;
+    var target = event.detail.target;
+    var current = (target && target.id && doc.getElementById(target.id)) || target;
+    if (current) initDialogs(current);
     initTabs(doc);
     tickElapsed();
   });

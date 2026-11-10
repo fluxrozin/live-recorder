@@ -5,7 +5,14 @@ import pytest
 from live_recorder.recording.commands import pick_tiktok_pull_url, streamlink_tiktok_args
 from live_recorder.recording.files import PathEscape, build_segment_path, resolve_stored, safe_token
 from live_recorder.recording.integrity import scan_storage
-from live_recorder.recording.policy import ACCESS_DENIED, INTERRUPTED, next_action
+from live_recorder.recording.policy import (
+    ACCESS_DENIED,
+    INTERRUPTED,
+    OFFLINE,
+    STOPPED,
+    next_action,
+    recording_result,
+)
 
 
 def test_hls_url_stays_on_twitcasting():
@@ -17,20 +24,41 @@ def test_hls_url_stays_on_twitcasting():
     assert validate_hls_url("https://evil.example/live.m3u8") is None
 
 
-def test_filename_strips_traversal(tmp_path: Path):
+def test_filename_uses_platform_user_time_and_title(tmp_path: Path):
     path = build_segment_path(
         root=tmp_path,
         platform="tiktok",
         user_id="../etc",
         when_stamp="20261109_210000",
         day="2026-11-09",
-        stream_id="room/1",
+        title="ゲスト出勤/../秘密",
         segment_number=2,
     )
     assert path.is_relative_to(tmp_path)
     assert ".." not in path.parts
-    assert path.name.startswith("tiktok_")
-    assert "_seg02.ts" in path.name
+    assert path.name == "tiktok_@etc_20261109_210000_ゲスト出勤..秘密_seg02.ts"
+    untitled = build_segment_path(
+        root=tmp_path,
+        platform="twitcasting",
+        user_id="caster",
+        when_stamp="20261110_010756",
+        day="2026-11-10",
+        title=None,
+        segment_number=1,
+    )
+    assert untitled.name == "twitcasting_@caster_20261110_010756_無題_seg01.ts"
+    long_name = build_segment_path(
+        root=tmp_path,
+        platform="tiktok",
+        user_id="9ri_pi",
+        when_stamp="20261110_010756",
+        day="2026-11-10",
+        title="あ" * 200,
+        segment_number=1,
+    )
+    assert len(long_name.name.encode("utf-8")) <= 255
+    assert long_name.name.startswith("tiktok_@9ri_pi_20261110_010756_")
+    assert long_name.name.endswith("_seg01.ts")
     assert safe_token("../../x") == "x"
 
 
@@ -44,6 +72,17 @@ def test_streamlink_command_uses_normalized_url():
     assert args[0] == "streamlink"
     assert "https://www.tiktok.com/@user.name/live" in args
     assert "--no-config" in args
+
+
+def test_stream_end_with_media_is_completed():
+    assert recording_result(cancel_requested=False, kind=STOPPED, has_media=True, has_gaps=False) == "COMPLETED"
+    assert recording_result(cancel_requested=False, kind=OFFLINE, has_media=True, has_gaps=False) == "COMPLETED"
+    assert recording_result(cancel_requested=False, kind=STOPPED, has_media=True, has_gaps=True) == "PARTIAL"
+    assert recording_result(cancel_requested=False, kind=STOPPED, has_media=False, has_gaps=False) == "FAILED"
+
+
+def test_monitoring_stop_stays_cancelled():
+    assert recording_result(cancel_requested=True, kind=STOPPED, has_media=True, has_gaps=False) == "CANCELLED"
 
 
 def test_access_denied_does_not_switch_engine():

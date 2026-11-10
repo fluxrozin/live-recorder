@@ -389,11 +389,61 @@ def test_system_scan_report_shows_all_categories():
 
 def test_active_sessions_partial_polls():
     html = render_page("dashboard.html", "normal")
-    assert 'hx-get="/partials/active-sessions"' in html
+    assert 'id="dashboard-poll"' in html
     assert 'hx-trigger="every 30s, lr:refresh"' in html
+    assert 'hx-select="#dashboard-live"' in html
+    assert "30秒ごと" in html
     partial = render("partials/active_sessions.html", fx.dashboard_context("normal"))
     assert "<html" not in partial
     assert "さくら" in partial and "data-elapsed-since" in partial
+
+
+def test_live_pages_refresh_without_settings_or_login():
+    expected = {
+        "dashboard.html": ("dashboard-poll", "dashboard-live"),
+        "streamers.html": ("streamers-poll", "streamers-live"),
+        "recordings.html": ("recordings-poll", "recording-results"),
+        "comments.html": ("comments-poll", "results"),
+        "recording_detail.html": ("recording-poll", "recording-live"),
+        "system.html": ("system-poll", "system-live"),
+    }
+    for name, (poll_id, body_id) in expected.items():
+        html = render_page(name, "normal")
+        assert f'id="{poll_id}"' in html
+        assert f'id="{body_id}"' in html
+        if body_id != "results":
+            assert f'id="{body_id}" class="c-live"' in html
+        assert 'data-poll="30"' in html
+        assert 'hx-trigger="every 30s, lr:refresh"' in html
+        assert "30秒ごと" in html
+    assert "data-poll" not in render_page("settings.html", "normal")
+    assert "data-poll" not in render_page("login.html", "normal")
+    assert "data-poll" not in render_page("streamer_form.html", "normal")
+    system = render("system.html", fx.system_context("normal", with_report=True))
+
+    class _Nest(HTMLParser):
+        void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+        def __init__(self):
+            super().__init__()
+            self.stack: list[str] = []
+            self.scan_in_live = False
+
+        def handle_starttag(self, tag, attrs):
+            found = dict(attrs).get("id", "")
+            if found == "scan" and "system-live" in self.stack:
+                self.scan_in_live = True
+            if tag not in self.void:
+                self.stack.append(found)
+
+        def handle_endtag(self, tag):
+            if tag not in self.void and self.stack:
+                self.stack.pop()
+
+    nest = _Nest()
+    nest.feed(system)
+    assert not nest.scan_in_live
+    assert "ファイル照合" in system
 
 
 def test_dashboard_errors_only_when_present():

@@ -14,14 +14,28 @@ def ensure_aware(value: datetime) -> datetime:
     return value
 
 
+def display_zone(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("Asia/Tokyo")
+
+
+def to_display(value: datetime, tz_name: str) -> datetime:
+    return ensure_aware(value).astimezone(display_zone(tz_name))
+
+
 def format_local(value: datetime | None, tz_name: str) -> str:
     if value is None:
         return "—"
-    try:
-        zone = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        zone = ZoneInfo("Asia/Tokyo")
-    return ensure_aware(value).astimezone(zone).strftime("%Y-%m-%d %H:%M:%S")
+    return to_display(value, tz_name).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_export_time(value: datetime | None, tz_name: str) -> str | None:
+    """書き出し用の時刻。設定タイムゾーンのオフセット付き ISO 8601。"""
+    if value is None:
+        return None
+    return to_display(value, tz_name).isoformat()
 
 
 def format_offset(ms: int | None) -> str:
@@ -57,10 +71,7 @@ def parse_platform_time(value: object) -> datetime | None:
 
 
 def start_of_local_day(tz_name: str, now: datetime | None = None) -> datetime:
-    try:
-        zone = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        zone = ZoneInfo("Asia/Tokyo")
+    zone = display_zone(tz_name)
     current = ensure_aware(now or utcnow()).astimezone(zone)
     start = current.replace(hour=0, minute=0, second=0, microsecond=0)
     return start.astimezone(timezone.utc)

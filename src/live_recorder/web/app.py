@@ -174,9 +174,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tz = await runtime_tz(request)
             except Exception:
                 tz = request.app.state.settings.display_timezone
+        # 定期更新は同じセッションの画面遷移用フラッシュを消費しない
+        partial = request.headers.get("hx-request") == "true"
         context = {
             "csrf": csrf(request),
-            "flash": _flash_payload(request.session.pop("flash", None)),
+            "flash": None if partial else _flash_payload(request.session.pop("flash", None)),
             "tz": tz,
             "username": request.session.get("username"),
             "rendered_at": utcnow(),
@@ -654,7 +656,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         filters = _comment_filters(request, tz)
         async with request.app.state.db.session() as session:
             repo = Repository(session)
-            rows, total = await repo.search_comments(page=filters["page"], page_size=50, **filters["query"])
+            rows, total = await repo.search_comments(
+                page=filters["page"], page_size=50, newest_first=True, **filters["query"]
+            )
             people = await repo.list_streamers()
             comments = [
                 {
@@ -1141,6 +1145,25 @@ def _fallback_runtime(form: dict):
     )
 
 
+async def _component_versions(request: Request) -> dict:
+    """録画エンジンの版はプロセス中に変わらないので、定期更新のたびに起動し直さない。"""
+    cached = getattr(request.app.state, "component_versions", None)
+    if cached is not None:
+        return cached
+    settings: Settings = request.app.state.settings
+    tiktok_version, _installed = tiktoklive_status()
+    cached = {
+        "app": __version__,
+        "streamlink": await command_output([settings.streamlink_path, "--version"]),
+        "yt_dlp": await command_output([settings.ytdlp_path, "--version"]),
+        "ffmpeg": tool_version(await command_output([settings.ffmpeg_path, "-version"])),
+        "ffprobe": tool_version(await command_output([settings.ffprobe_path, "-version"])),
+        "tiktoklive": tiktok_version,
+    }
+    request.app.state.component_versions = cached
+    return cached
+
+
 async def _system_payload(request: Request, report) -> dict:
     settings: Settings = request.app.state.settings
     async with request.app.state.db.session() as session:
@@ -1168,15 +1191,7 @@ async def _system_payload(request: Request, report) -> dict:
             for engine in engines
         ]
         event_rows = [{"created_at": event.created_at, "severity": event.severity, "message": event.message} for event in events]
-    tiktok_version, _installed = tiktoklive_status()
-    versions = {
-        "app": __version__,
-        "streamlink": await command_output([settings.streamlink_path, "--version"]),
-        "yt_dlp": await command_output([settings.ytdlp_path, "--version"]),
-        "ffmpeg": tool_version(await command_output([settings.ffmpeg_path, "-version"])),
-        "ffprobe": tool_version(await command_output([settings.ffprobe_path, "-version"])),
-        "tiktoklive": tiktok_version,
-    }
+    versions = await _component_versions(request)
     return {
         "tz": runtime.display_timezone,
         "versions": versions,

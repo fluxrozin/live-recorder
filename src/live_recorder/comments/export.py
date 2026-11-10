@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable, Iterator
 from datetime import datetime
 
-from live_recorder.timeutil import format_local, format_offset
+from live_recorder.timeutil import format_export_time, format_offset
 
 _FORMULA = ("=", "+", "-", "@", "\t", "\r")
 
@@ -97,9 +97,9 @@ def export_row(
 ) -> dict[str, object]:
     shown = posted_at or received_at
     return {
-        "time": format_local(shown, timezone_name),
-        "posted_at": posted_at.isoformat() if posted_at else None,
-        "received_at": received_at.isoformat(),
+        "time": format_export_time(shown, timezone_name) or "",
+        "posted_at": format_export_time(posted_at, timezone_name),
+        "received_at": format_export_time(received_at, timezone_name),
         "user_id": user_id or "",
         "nickname": nickname or "",
         "message": message,

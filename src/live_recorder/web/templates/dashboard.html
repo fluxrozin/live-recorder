@@ -2,6 +2,8 @@
 {% set active_nav = "dashboard" %}
 {% block title %}ダッシュボード{% endblock %}
 {% block content %}
+<div {{ ui.live_poll("dashboard-poll", "dashboard-live", "/") }}>
+<div id="dashboard-live" class="c-live">
 {{ ui.page_header("ダッシュボード", "監視・録画・コメント収集の稼働状況を確認します") }}
 
 {%- set used_pct = percent(used, total) -%}
@@ -46,7 +48,7 @@
 <div class="l-grid-main">
   <div class="u-stack-lg">
     <section class="c-card" aria-labelledby="active-title">
-      <div id="active-sessions" class="c-loading-region" hx-get="/partials/active-sessions" hx-trigger="every 30s, lr:refresh" hx-swap="innerHTML" data-poll="30">
+      <div id="active-sessions">
         {% include "partials/active_sessions.html" %}
       </div>
     </section>
@@ -151,5 +153,7 @@
     </section>
     {% endif %}
   </div>
+</div>
+</div>
 </div>
 {% endblock %}

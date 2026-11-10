@@ -13,6 +13,36 @@ from live_recorder.timeutil import parse_platform_time, utcnow
 log = logging.getLogger(__name__)
 
 
+async def lookup_room(user_id: str, *, timeout: float = 5) -> dict[str, Any] | None:
+    """録画ファイル名に使うタイトルのため、配信開始時だけルーム情報を取る。"""
+    from TikTokLive import TikTokLiveClient
+
+    normalized = normalize_tiktok(user_id)
+    client = TikTokLiveClient(unique_id=normalized)
+
+    async def _fetch() -> dict[str, Any] | None:
+        try:
+            await client.start(fetch_room_info=True)
+            for _ in range(20):
+                info = getattr(client, "room_info", None)
+                if isinstance(info, dict) and (info.get("title") or info.get("id") or info.get("room_id")):
+                    return info
+                await asyncio.sleep(0.25)
+            info = getattr(client, "room_info", None)
+            return info if isinstance(info, dict) else None
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                log.info("tiktok room lookup disconnect failed")
+
+    try:
+        return await asyncio.wait_for(_fetch(), timeout)
+    except Exception as exc:
+        log.info("tiktok room lookup failed for %s: %s", normalized, type(exc).__name__)
+        return None
+
+
 async def check_tiktok(user_id: str, *, client: Any | None = None, timeout: float = 30) -> LiveObservation:
     normalized = normalize_tiktok(user_id)
     if client is None:

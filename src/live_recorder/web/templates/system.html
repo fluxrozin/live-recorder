@@ -3,7 +3,7 @@
 {% block title %}システム状態{% endblock %}
 {% block content %}
 {% call ui.page_header("システム状態", "コンテナ、データベース、録画エンジンの稼働状況と、保存先の診断を確認します") %}
-  <a class="c-btn" href="/system">{{ ui.icon("refresh-cw", "sm") }}再読み込み</a>
+  <a class="c-btn" href="/system" hx-get="/system" hx-target="#system-live" hx-select="#system-live" hx-swap="outerHTML ignoreTitle:true" hx-select-oob="#topbar-freshness:innerHTML" data-current-url hx-indicator="#poll-status">{{ ui.icon("refresh-cw", "sm") }}再読み込み</a>
 {% endcall %}
 
 {%- set check_age = (rendered_at - last_checked).total_seconds() if last_checked else none -%}
@@ -15,6 +15,9 @@
   {%- set check_state = "ok" -%}
 {%- endif %}
 
+<div {{ ui.live_poll("system-poll", "system-live", "/system") }}>
+<div id="system-live" class="c-live">
+<div class="u-row"><span class="u-spacer"></span>{{ ui.poll_status(rendered_at, tz) }}</div>
 <section class="c-health-grid" aria-label="ヘルスチェック">
   <div class="c-health">
     <div class="c-health__head"><span class="c-health__label">{{ ui.icon("globe") }}Webアプリ</span>{{ ui.status("health", "ok") }}</div>
@@ -137,13 +140,15 @@
         <dl class="c-props">
           <dt>TikTok 署名キー</dt>
           <dd>{% if sign_key %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
-          <dt>ツイキャス認証</dt>
+          <dt>Twitcasting 認証</dt>
           <dd>{% if twitcasting %}<span class="c-status c-status--success">{{ ui.icon("circle-check") }}設定済み</span>{% else %}<span class="c-status c-status--neutral">{{ ui.icon("minus") }}未設定</span>{% endif %}</dd>
         </dl>
         <p class="u-caption">値は環境変数で設定します。内容は表示しません。</p>
       </div>
     </section>
   </div>
+</div>
+</div>
 </div>
 
 {%- set categories = [

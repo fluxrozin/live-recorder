@@ -2,8 +2,8 @@
 <header class="c-card__header">
   <h2 class="c-card__title" id="active-title">{{ ui.icon("radio") }}アクティブセッション <span class="c-count">{{ active|length }}</span></h2>
   <div class="c-card__actions">
-    <span class="c-freshness" data-poll-status>{{ ui.icon("clock", "sm") }}<span>更新 <time class="u-num" datetime="{{ rendered_at|iso }}">{{ rendered_at|clock(tz) }}</time> · 30秒ごと</span></span>
-    <button type="button" class="c-icon-btn c-icon-btn--sm" hx-get="/partials/active-sessions" hx-target="#active-sessions" hx-swap="innerHTML" hx-indicator="#active-sessions" aria-label="アクティブセッションを今すぐ更新" title="今すぐ更新">{{ ui.icon("refresh-cw", "sm") }}</button>
+    {{ ui.poll_status(rendered_at, tz) }}
+    <button type="button" class="c-icon-btn c-icon-btn--sm" hx-get="/" hx-target="#dashboard-live" hx-select="#dashboard-live" hx-swap="outerHTML ignoreTitle:true" hx-select-oob="#topbar-freshness:innerHTML" data-current-url hx-indicator="#poll-status" aria-label="ダッシュボードを今すぐ更新" title="今すぐ更新">{{ ui.icon("refresh-cw", "sm") }}</button>
   </div>
 </header>
 {% if worker.state != "ok" %}

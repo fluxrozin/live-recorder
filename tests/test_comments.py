@@ -1,7 +1,13 @@
 from datetime import datetime, timezone
 
 from live_recorder.comments.dedupe import dedupe_key
-from live_recorder.comments.export import csv_safe, escape_log_text, render_csv, render_txt
+from live_recorder.comments.export import (
+    csv_safe,
+    escape_log_text,
+    export_row,
+    render_csv,
+    render_txt,
+)
 from live_recorder.comments.offsets import offsets
 from live_recorder.comments.segments import (
     ExportSegment,
@@ -108,6 +114,43 @@ def test_csv_formula_and_newline_escape():
     assert log == "[00:00:12] user_a: 一行目\\n二行目\n"
     assert "\n二" not in log.split("user_a: ", 1)[1].replace("\\n", "")
     assert escape_log_text("a\nb") == "a\\nb"
+
+
+def test_export_times_follow_display_timezone():
+    posted = datetime(2026, 11, 9, 1, 2, 3, tzinfo=timezone.utc)
+    received = datetime(2026, 11, 9, 1, 2, 5, tzinfo=timezone.utc)
+    row = export_row(
+        posted_at=posted,
+        received_at=received,
+        timezone_name="Asia/Tokyo",
+        user_id="u",
+        nickname="n",
+        message="m",
+        platform="tiktok",
+        stream_id="s",
+        recording_offset_ms=1000,
+        stream_offset_ms=2000,
+        platform_comment_id="c",
+    )
+    assert row["posted_at"] == "2026-11-09T10:02:03+09:00"
+    assert row["received_at"] == "2026-11-09T10:02:05+09:00"
+    assert row["time"] == "2026-11-09T10:02:03+09:00"
+    assert "+00:00" not in str(row["posted_at"]) + str(row["received_at"]) + str(row["time"])
+    missing = export_row(
+        posted_at=None,
+        received_at=datetime(2026, 11, 9, 15, 0),
+        timezone_name="Asia/Tokyo",
+        user_id="u",
+        nickname="n",
+        message="m",
+        platform="tiktok",
+        stream_id="s",
+        recording_offset_ms=None,
+        stream_offset_ms=None,
+        platform_comment_id=None,
+    )
+    assert missing["posted_at"] is None
+    assert missing["time"] == missing["received_at"] == "2026-11-10T00:00:00+09:00"
 
 
 def test_comment_export_uses_recording_stem():

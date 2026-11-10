@@ -463,6 +463,7 @@ class Repository:
         end: datetime | None,
         page: int,
         page_size: int,
+        newest_first: bool = False,
     ) -> tuple[list[Comment], int]:
         stmt = select(Comment).join(StreamSession).join(Streamer)
         filters = []
@@ -487,9 +488,13 @@ class Repository:
         count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
         total = int(await self.session.scalar(count_stmt) or 0)
         stmt = stmt.options(selectinload(Comment.session).selectinload(StreamSession.streamer))
+        if newest_first:
+            order = (Comment.received_at.desc(), Comment.id.desc())
+        else:
+            order = (Comment.received_at.asc(), Comment.id.asc())
         rows = list(
             await self.session.scalars(
-                stmt.order_by(Comment.received_at.asc()).offset(max(0, page - 1) * page_size).limit(page_size)
+                stmt.order_by(*order).offset(max(0, page - 1) * page_size).limit(page_size)
             )
         )
         return rows, total
