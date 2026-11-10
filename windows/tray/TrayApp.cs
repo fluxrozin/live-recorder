@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Reflection;
@@ -13,7 +14,6 @@ sealed class TrayConfig
 {
     public string Distro;
     public string Project;
-    public int WebPort;
 }
 
 sealed class CommandResult
@@ -67,21 +67,6 @@ static class JsonRead
         if (i + 4 <= json.Length && json.Substring(i, 4) == "true") return true;
         if (i + 5 <= json.Length && json.Substring(i, 5) == "false") return false;
         return null;
-    }
-
-    public static int Int(string json, string key, int fallback)
-    {
-        int colon = Colon(json, key);
-        if (colon < 0) return fallback;
-        int i = Skip(json, colon + 1);
-        int end = i;
-        if (end < json.Length && (json[end] == '-' || json[end] == '+')) end++;
-        int digits = end;
-        while (end < json.Length && char.IsDigit(json[end])) end++;
-        if (end == digits) return fallback;
-        int value;
-        if (!int.TryParse(json.Substring(i, end - i), out value)) return fallback;
-        return value;
     }
 
     static int Colon(string json, string key)
@@ -212,9 +197,7 @@ sealed class TrayContext : ApplicationContext
         string distro = JsonRead.String(text, "distro");
         string project = JsonRead.String(text, "project");
         if (string.IsNullOrEmpty(distro) || string.IsNullOrEmpty(project)) return null;
-        int port = JsonRead.Int(text, "web_port", 8080);
-        if (port < 1 || port > 65535) port = 8080;
-        return new TrayConfig { Distro = distro, Project = project, WebPort = port };
+        return new TrayConfig { Distro = distro, Project = project };
     }
 
     void OnTick(object sender, EventArgs e)
@@ -254,7 +237,7 @@ sealed class TrayContext : ApplicationContext
         {
             var ps = RunWsl(config, "ps --all --format json", 20000);
             int running = ps.Ok ? CountRunning(ps.Stdout) : 0;
-            var health = FetchHealth(config.WebPort);
+            var health = FetchHealth(ReadWebPort(config));
             Post(delegate
             {
                 _polling = false;
@@ -409,14 +392,22 @@ sealed class TrayContext : ApplicationContext
     void OpenBrowser()
     {
         if (_config == null) return;
-        try
+        var config = _config;
+        ThreadPool.QueueUserWorkItem(delegate
         {
-            Process.Start("http://127.0.0.1:" + _config.WebPort.ToString() + "/");
-        }
-        catch (Exception ex)
-        {
-            Balloon("管理画面を開けません", ex.Message);
-        }
+            int port = ReadWebPort(config);
+            Post(delegate
+            {
+                try
+                {
+                    Process.Start("http://127.0.0.1:" + port.ToString() + "/");
+                }
+                catch (Exception ex)
+                {
+                    Balloon("管理画面を開けません", ex.Message);
+                }
+            });
+        });
     }
 
     void Apply(int running, bool psOk, string psError, bool healthOk, bool recording)
@@ -562,11 +553,47 @@ sealed class TrayContext : ApplicationContext
         }
     }
 
+    static int ReadWebPort(TrayConfig config)
+    {
+        return EnvPort.Parse(ReadProjectEnv(config));
+    }
+
+    static string ReadProjectEnv(TrayConfig config)
+    {
+        string rel = config.Project.Replace('/', '\\');
+        if (rel.Length == 0 || rel[0] != '\\') rel = "\\" + rel;
+        string[] roots = new string[] { @"\\wsl.localhost\", @"\\wsl$\" };
+        foreach (string root in roots)
+        {
+            string path = root + config.Distro + rel + @"\.env";
+            try
+            {
+                if (!File.Exists(path)) continue;
+                using (var reader = new StreamReader(path, Encoding.UTF8, true))
+                    return EnvPort.WebPortLines(reader);
+            }
+            catch (Exception)
+            {
+            }
+        }
+        var result = ExecWsl(
+            config,
+            "grep -E \"^[[:space:]]*(export[[:space:]]+)?WEB_PORT[[:space:]]*=\" .env",
+            15000);
+        if (string.IsNullOrEmpty(result.Stdout)) return "";
+        return result.Stdout;
+    }
+
     static CommandResult RunWsl(TrayConfig config, string composeArgs, int timeoutMs)
+    {
+        return ExecWsl(config, "docker compose " + composeArgs, timeoutMs);
+    }
+
+    static CommandResult ExecWsl(TrayConfig config, string command, int timeoutMs)
     {
         var psi = new ProcessStartInfo();
         psi.FileName = "wsl.exe";
-        psi.Arguments = "-d " + Quote(config.Distro) + " --cd " + Quote(config.Project) + " -- docker compose " + composeArgs;
+        psi.Arguments = "-d " + Quote(config.Distro) + " --cd " + Quote(config.Project) + " -- " + command;
         psi.UseShellExecute = false;
         psi.RedirectStandardOutput = true;
         psi.RedirectStandardError = true;
@@ -657,6 +684,73 @@ sealed class TrayContext : ApplicationContext
         if (string.IsNullOrEmpty(value)) return "\"\"";
         if (value.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return value;
         return "\"" + value.Replace("\"", "\\\"") + "\"";
+    }
+}
+
+static class EnvPort
+{
+    internal static int Parse(string text)
+    {
+        int port = 8080;
+        if (string.IsNullOrEmpty(text)) return port;
+        if (text[0] == '\uFEFF') text = text.Substring(1);
+        string[] lines = text.Replace("\r", "").Split('\n');
+        foreach (string raw in lines)
+        {
+            string line = raw.Trim();
+            if (line.Length == 0 || line[0] == '#') continue;
+            if (line.StartsWith("export ") || line.StartsWith("export\t"))
+                line = line.Substring(7).TrimStart();
+            int eq = line.IndexOf('=');
+            if (eq <= 0) continue;
+            if (line.Substring(0, eq).Trim() != "WEB_PORT") continue;
+            string value = Value(line.Substring(eq + 1).Trim());
+            int parsed;
+            if (value.Length > 0
+                && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed)
+                && parsed >= 1 && parsed <= 65535)
+                port = parsed;
+            else
+                port = 8080;
+        }
+        return port;
+    }
+
+    internal static string WebPortLines(TextReader reader)
+    {
+        var sb = new StringBuilder();
+        string line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            if (IsWebPortLine(line)) sb.AppendLine(line);
+        }
+        return sb.ToString();
+    }
+
+    static bool IsWebPortLine(string raw)
+    {
+        string line = raw.Trim();
+        if (line.Length == 0 || line[0] == '#') return false;
+        if (line.StartsWith("export ") || line.StartsWith("export\t"))
+            line = line.Substring(7).TrimStart();
+        int eq = line.IndexOf('=');
+        if (eq <= 0) return false;
+        return line.Substring(0, eq).Trim() == "WEB_PORT";
+    }
+
+    static string Value(string raw)
+    {
+        if (raw.Length >= 2 && (raw[0] == '"' || raw[0] == '\''))
+        {
+            char quote = raw[0];
+            int close = raw.IndexOf(quote, 1);
+            if (close >= 1) return raw.Substring(1, close - 1).Trim();
+        }
+        int cut = raw.IndexOf(" #");
+        int tab = raw.IndexOf("\t#");
+        if (tab >= 0 && (cut < 0 || tab < cut)) cut = tab;
+        if (cut >= 0) raw = raw.Substring(0, cut);
+        return raw.Trim();
     }
 }
 

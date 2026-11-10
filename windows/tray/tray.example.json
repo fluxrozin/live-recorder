@@ -1,5 +1,4 @@
 {
   "distro": "Ubuntu",
-  "project": "/home/aoki/projects/live-recorder",
-  "web_port": 8080
+  "project": "/home/aoki/projects/live-recorder"
 }
