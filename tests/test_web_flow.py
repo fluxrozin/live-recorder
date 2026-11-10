@@ -140,6 +140,12 @@ def _login(client) -> str:
     return _csrf(client.get("/").text)
 
 
+def test_healthz_reports_active_recording(client):
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "recording": True}
+
+
 def test_pages_require_login(client):
     for path in (
         "/",

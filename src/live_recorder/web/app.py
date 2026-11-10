@@ -154,7 +154,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 from sqlalchemy import text
 
                 await session.execute(text("SELECT 1"))
-            return {"status": "ok"}
+                recording = await Repository(session).count_active_recordings() > 0
+            return {"status": "ok", "recording": recording}
         except Exception:
             return Response('{"status":"error"}', status_code=503, media_type="application/json")
 
