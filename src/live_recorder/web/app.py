@@ -71,6 +71,7 @@ from live_recorder.timeutil import (
 )
 from live_recorder.versions import tiktoklive_status, tool_version
 from live_recorder.web import ui as ui_helpers
+from live_recorder.web.disposition import attachment_disposition
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKER_OK_SECONDS = 45
@@ -685,7 +686,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chunks(),
             media_type="application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Disposition": attachment_disposition(filename),
                 "Content-Length": str(path.stat().st_size),
                 "Accept-Ranges": "none",
                 "Cache-Control": "no-store",
@@ -716,7 +717,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=body,
             media_type="application/x-subrip; charset=utf-8",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Disposition": attachment_disposition(filename),
                 "Content-Length": str(len(body)),
                 "Cache-Control": "no-store",
             },
@@ -787,7 +788,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=body,
             media_type="text/plain; charset=utf-8",
             headers={
-                "Content-Disposition": f'attachment; filename="{written.name}"',
+                "Content-Disposition": attachment_disposition(written.name),
                 "Content-Length": str(len(body)),
                 "Cache-Control": "no-store",
             },
@@ -1042,7 +1043,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(
             content=body,
             media_type=media,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+            headers={"Content-Disposition": attachment_disposition(filename), "Cache-Control": "no-store"},
         )
 
     @app.get("/settings", response_class=HTMLResponse)
