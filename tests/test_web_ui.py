@@ -227,8 +227,7 @@ def test_streamer_delete_dialog_and_edit_form():
         "comments_enabled",
     } <= field_names(forms["/streamers/1/edit"])
     assert "confirm" in field_names(forms["/streamers/1/delete"])
-    assert "speech_words" in field_names(forms["/streamers/1/speech-words"])
-    assert "さくら" in html
+    assert "/streamers/1/speech-words" not in forms
     listing = render_page("streamers.html", "normal")
     assert 'href="/streamers/1/edit#speech-words"' not in listing
     assert listing.count('href="/streamers/1/edit"') == 1
@@ -701,7 +700,6 @@ def test_existing_routes_are_kept(tmp_path):
         ("POST", "/streamers/{streamer_id}/edit"),
         ("POST", "/streamers/order"),
         ("POST", "/streamers/reorder"),
-        ("POST", "/streamers/{streamer_id}/speech-words"),
         ("POST", "/streamers/{streamer_id}/toggle"),
         ("POST", "/streamers/{streamer_id}/delete"),
         ("GET", "/recordings"),

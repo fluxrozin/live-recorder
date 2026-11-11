@@ -70,6 +70,28 @@ def test_rotated_probe_swaps_width_and_height():
     assert display_size_from_probe(upright) == (1920, 1080)
 
 
+def test_speech_keeps_its_end_when_the_next_line_follows():
+    body = render_ass(
+        [(0, 8_000, "見てたら"), (8_000, 9_200, "こんな時間になってた")],
+        [],
+        width=1080,
+        height=1920,
+    )
+    assert "Dialogue: 0,0:00:00.00,0:00:08.00,Speech," in body
+    assert "Dialogue: 0,0:00:08.00,0:00:09.20,Speech," in body
+
+
+def test_speech_hides_a_long_tail_before_silence():
+    body = render_ass(
+        [(0, 30_000, "見てたら"), (40_000, 42_000, "続き")],
+        [],
+        width=1080,
+        height=1920,
+    )
+    assert "Dialogue: 0,0:00:00.00,0:00:02.50,Speech," in body
+    assert "Dialogue: 0,0:00:40.00,0:00:42.00,Speech," in body
+
+
 def test_long_speech_does_not_stay_up_and_emoji_are_removed():
     body = render_ass(
         [(0, 70_000, "あんよが")],

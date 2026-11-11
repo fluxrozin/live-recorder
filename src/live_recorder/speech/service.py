@@ -60,8 +60,6 @@ async def _claim(db: Database):
             await session.commit()
             return None
         previous = segment.speech_srt_path
-        speaker = segment.job.session.streamer if segment.job is not None and segment.job.session is not None else None
-        hotwords = speaker.speech_words if speaker is not None else None
         segment.speech_status = "running"
         claimed = (
             segment.id,
@@ -69,7 +67,6 @@ async def _claim(db: Database):
             runtime.speech_model,
             runtime.speech_language,
             previous,
-            hotwords,
         )
         await session.commit()
         return claimed
@@ -118,7 +115,7 @@ async def _run(stop: asyncio.Event) -> None:
                 except TimeoutError:
                     continue
                 continue
-            segment_id, relative, model_name, language, previous_srt, hotwords = claimed
+            segment_id, relative, model_name, language, previous_srt = claimed
             try:
                 video = resolve_stored(settings.recordings_dir, relative)
                 if not video.is_file():
@@ -129,12 +126,11 @@ async def _run(stop: asyncio.Event) -> None:
                 current = model
                 status, produced, error = await asyncio.to_thread(
                     interpret_speech,
-                    lambda current=current, video=video, language=language, hotwords=hotwords: transcribe_video(
+                    lambda current=current, video=video, language=language: transcribe_video(
                         settings.ffmpeg_path,
                         current,
                         video,
                         language=language,
-                        hotwords=hotwords,
                     ),
                 )
             except Exception as exc:

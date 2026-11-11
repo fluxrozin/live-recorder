@@ -4,7 +4,7 @@
 {% block title %}{{ row.display_name }} の編集{% endblock %}
 {% block content %}
 {% set eyebrow %}{{ ui.platform(row.platform) }}<span class="u-mono">{{ row.user_id }}</span>{% endset %}
-{% call ui.page_header(row.display_name, "表示名、監視の設定、字幕に出したい固有名詞を変更します", eyebrow=eyebrow) %}
+{% call ui.page_header(row.display_name, "表示名と監視の設定を変更します", eyebrow=eyebrow) %}
   <a class="c-btn" href="/recordings?streamer_id={{ row.id }}">{{ ui.icon("history") }}録画履歴</a>
 {% endcall %}
 
@@ -33,26 +33,6 @@
       <span class="u-spacer"></span>
       <a class="c-btn" href="/streamers">キャンセル</a>
       <button type="submit" class="c-btn c-btn--primary">変更を保存</button>
-    </footer>
-  </form>
-
-  <form class="c-card" id="speech-words" method="post" action="/streamers/{{ row.id }}/speech-words" data-busy aria-labelledby="speech-words-title">
-    {{ ui.csrf_input() }}
-    <header class="c-card__header">
-      <h2 class="c-card__title" id="speech-words-title">{{ ui.icon("file-text") }}字幕の単語</h2>
-      <p class="c-card__subtitle">この配信者の固有名詞を、次に生成する字幕のヒントにします。</p>
-    </header>
-    <div class="c-card__body u-stack">
-      {% if words_error %}{{ ui.alert("danger", text=words_error, role="alert") }}{% endif %}
-      <div class="c-field">
-        <label class="c-label" for="speech-words-input">単語</label>
-        <textarea class="c-input" id="speech-words-input" name="speech_words" rows="8" spellcheck="false" aria-describedby="speech-words-hint">{{ row.speech_words }}</textarea>
-        <p class="c-hint" id="speech-words-hint">配信者名やゲーム名を、空白か改行で区切って書きます。空ならヒントなしです。できている字幕には遡らず、次の生成と再生成から使います。200文字までです。</p>
-      </div>
-    </div>
-    <footer class="c-card__footer">
-      <span class="u-spacer"></span>
-      <button type="submit" class="c-btn c-btn--primary">単語を保存</button>
     </footer>
   </form>
 </div>

@@ -19,6 +19,8 @@ _SPEECH_COLOUR = "&H00FFFFFF"
 _COMMENT_COLOUR = "&H0000FFFF"
 
 Cue = tuple[int, int, str]
+# 次の音声字幕がこの以内に続くときは、文字数で終点を切らない。
+_HANDOFF_MS = 400
 
 
 def combined_ass_path(video: Path) -> Path:
@@ -220,7 +222,7 @@ def _legacy_jsonl_cues(path: Path) -> list[Cue]:
 
 
 def _speech_events(cues: list[Cue]) -> list[tuple[int, int, int, str]]:
-    events: list[tuple[int, int, int, str]] = []
+    prepared: list[tuple[int, int, int, str]] = []
     for index, (start, end, text) in enumerate(cues):
         shown = text.strip()
         if not shown or end <= start:
@@ -228,7 +230,13 @@ def _speech_events(cues: list[Cue]) -> list[tuple[int, int, int, str]]:
         plain = _plain_text(shown)
         if not plain:
             continue
-        visible_end = _speech_visible_end(start, end, plain)
+        prepared.append((index, start, end, plain))
+    prepared.sort(key=lambda item: (item[1], item[0]))
+    events: list[tuple[int, int, int, str]] = []
+    for position, (index, start, end, plain) in enumerate(prepared):
+        nxt = prepared[position + 1][1] if position + 1 < len(prepared) else None
+        follows = nxt is not None and nxt <= end + _HANDOFF_MS
+        visible_end = end if follows else _speech_visible_end(start, end, plain)
         events.append((start, 0, index, _dialogue(0, start, visible_end, _SPEECH_STYLE, r"{\an2}" + escape_ass(plain))))
     return events
 

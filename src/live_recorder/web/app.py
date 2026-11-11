@@ -57,11 +57,6 @@ from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.process import command_output
 from live_recorder.speech.queue import requeue_speech
 from live_recorder.speech.srt import read_speech_cues, speech_srt_path, unlink_speech_sidecar
-from live_recorder.speech.words import (
-    SpeechWordsError,
-    normalize_speech_words,
-    speech_words_for_form,
-)
 from live_recorder.timeutil import (
     ensure_aware,
     format_local,
@@ -461,31 +456,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await session.commit()
         flash(request, "配信者を更新しました")
         return RedirectResponse("/streamers", status_code=303)
-
-    @app.post("/streamers/{streamer_id}/speech-words")
-    async def streamer_speech_words(request: Request, streamer_id: int):
-        blocked = await require_user(request)
-        if blocked:
-            return blocked
-        form = dict(await request.form())
-        check_csrf(request, form)
-        raw = str(form.get("speech_words") or "")
-        async with request.app.state.db.session() as session:
-            streamer = await Repository(session).get_streamer(streamer_id)
-            if streamer is None:
-                raise HTTPException(404)
-            try:
-                words = normalize_speech_words(raw)
-            except SpeechWordsError as exc:
-                row = _streamer_dict(streamer)
-                row["speech_words"] = raw
-                return await render(
-                    request, "streamer_form.html", row=row, error="", words_error=str(exc), status_code=400
-                )
-            streamer.speech_words = words or None
-            await session.commit()
-        flash(request, "字幕の単語を保存しました")
-        return RedirectResponse(f"/streamers/{streamer_id}/edit#speech-words", status_code=303)
 
     @app.post("/streamers/{streamer_id}/toggle", response_class=HTMLResponse)
     async def streamer_toggle(request: Request, streamer_id: int):
@@ -1288,7 +1258,6 @@ def _streamer_dict(streamer: Streamer) -> dict:
         "monitoring_enabled": streamer.monitoring_enabled,
         "recording_enabled": streamer.recording_enabled,
         "comments_enabled": streamer.comments_enabled,
-        "speech_words": speech_words_for_form(streamer.speech_words),
         "live_status": streamer.live_status,
         "last_checked_at": streamer.last_checked_at,
         "last_live_at": streamer.last_live_at,

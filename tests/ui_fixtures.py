@@ -625,8 +625,7 @@ def streamer_form_context(scenario: str) -> dict:
         if scenario == "stress"
         else _streamer(1, now)
     )
-    row["speech_words"] = "とても長い固有名詞" * 8 if scenario == "stress" else "さくら\nApex"
-    return base_context("/streamers/1/edit", row=row, error="", words_error="")
+    return base_context("/streamers/1/edit", row=row, error="")
 
 
 def login_context(scenario: str) -> dict:

@@ -20,34 +20,37 @@ def load_whisper(model_name: str, download_root: Path):
     )
 
 
-def transcribe(model, audio_path: Path, *, language: str, hotwords: str | None = None) -> list:
+def transcribe(model, audio_path: Path, *, language: str) -> list:
+    """セグメントの文章を残し、区間の内側にある語の時刻へ開始と終了を寄せる。"""
     from live_recorder.speech.quality import (
         SpeechCue,
+        SpeechWord,
         collect_speech_words,
         keep_stable,
-        split_phrases,
+        refine_cue_times,
     )
 
-    options: dict = {
+    options = {
         "language": language,
         "vad_filter": True,
-        "word_timestamps": True,
         "temperature": 0.0,
         "condition_on_previous_text": False,
     }
-    cleaned = (hotwords or "").strip()
-    if cleaned:
-        options["hotwords"] = cleaned
     segments, _info = model.transcribe(str(audio_path), **options)
-    cues = [
-        SpeechCue(
-            start=segment.start,
-            end=segment.end,
-            text=segment.text,
-            compression_ratio=float(segment.compression_ratio or 0.0),
-            avg_logprob=float(segment.avg_logprob or 0.0),
-            words=collect_speech_words(getattr(segment, "words", None)),
-        )
-        for segment in segments
-    ]
-    return split_phrases(keep_stable(cues, hotwords=cleaned or None))
+    cues = keep_stable(
+        [
+            SpeechCue(
+                start=segment.start,
+                end=segment.end,
+                text=segment.text,
+                compression_ratio=float(segment.compression_ratio or 0.0),
+                avg_logprob=float(segment.avg_logprob or 0.0),
+            )
+            for segment in segments
+        ]
+    )
+    timed, _timed_info = model.transcribe(str(audio_path), **options, word_timestamps=True)
+    words: list[SpeechWord] = []
+    for segment in timed:
+        words.extend(collect_speech_words(getattr(segment, "words", None)))
+    return refine_cue_times(cues, tuple(words))

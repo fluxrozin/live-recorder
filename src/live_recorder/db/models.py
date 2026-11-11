@@ -47,7 +47,6 @@ class Streamer(Base):
     recording_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     comments_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    speech_words: Mapped[str | None] = mapped_column(Text)
     live_status: Mapped[str] = mapped_column(String(16), default="OFFLINE", server_default="OFFLINE")
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_live_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
