@@ -4,7 +4,7 @@ import pytest
 
 from live_recorder.db.runtime import SettingsValidationError, validate_runtime
 from live_recorder.speech.engine import transcribe
-from live_recorder.speech.quality import SpeechCue, keep_stable
+from live_recorder.speech.quality import SpeechCue, SpeechWord, keep_stable, split_phrases
 from live_recorder.speech.queue import (
     assign_speech_queue,
     interpret_speech,
@@ -46,6 +46,7 @@ def test_transcribe_sends_hotwords_only_when_present(tmp_path):
     model = _Model()
     transcribe(model, audio, language="ja", hotwords=" さくら Apex ")
     assert model.kwargs["hotwords"] == "さくら Apex"
+    assert model.kwargs["word_timestamps"] is True
     assert model.kwargs["condition_on_previous_text"] is False
     bare = _Model()
     transcribe(bare, audio, language="ja", hotwords="  ")
@@ -107,6 +108,133 @@ def test_keep_stable_removes_copied_hotword_runs_and_keeps_a_single_word():
         "おつきゅ ありがとう",
         "プープー言ってる猫ちゃんの話?",
         "おつきゅ コンカフェ",
+    ]
+
+
+def test_keep_stable_drops_hotword_echo_from_word_times():
+    words = (
+        SpeechWord("あり", 0.0, 0.2),
+        SpeechWord("がとう", 0.2, 0.5),
+        SpeechWord(" おつきゅ", 0.6, 0.9),
+        SpeechWord(" コンカフェ", 0.9, 1.2),
+        SpeechWord(" おーか", 1.2, 1.6),
+    )
+    cue = _cue("ありがとう おつきゅ コンカフェ おーか", start=0.0, end=1.6, words=words)
+    kept = keep_stable([cue], hotwords="おつきゅ コンカフェ おーか 斎藤")
+    assert [item.text for item in kept] == ["ありがとう"]
+    assert "".join(word.raw for word in kept[0].words).strip() == "ありがとう"
+    pieces = split_phrases(kept)
+    assert [(item.start, item.end, item.text) for item in pieces] == [(0.0, 0.5, "ありがとう")]
+
+
+def test_split_phrases_breaks_on_pause_and_line_length():
+    paused = _cue(
+        "はい いいえ",
+        start=0.0,
+        end=2.0,
+        words=(SpeechWord("はい", 0.0, 0.4), SpeechWord(" いいえ", 0.8, 1.2)),
+    )
+    continuous = _cue(
+        "あいうえおかきくけこさしすせそたちてと",
+        start=3.0,
+        end=6.0,
+        words=(
+            SpeechWord("あいうえおかきく", 3.0, 3.4),
+            SpeechWord("けこさしすせそた", 3.4, 3.8),
+            SpeechWord("てと", 3.8, 4.0),
+        ),
+        compression_ratio=1.2,
+    )
+    long = _cue(
+        "超絶ハイパーアルティメットスーパーミラクル",
+        start=5.0,
+        end=7.0,
+        words=(SpeechWord("超絶ハイパーアルティメットスーパーミラクル", 5.0, 7.0),),
+    )
+    plain = _cue("語の時刻が無い長い一文", start=8.0, end=12.0)
+    pieces = split_phrases([paused, continuous, long, plain])
+    assert [(item.start, item.end, item.text) for item in pieces] == [
+        (0.0, 0.4, "はい"),
+        (0.8, 1.2, "いいえ"),
+        (3.0, 3.8, "あいうえおかきくけこさしすせそた"),
+        (3.8, 4.0, "てと"),
+        (5.0, 7.0, "超絶ハイパーアルティメットスーパーミラクル"),
+        (8.0, 12.0, "語の時刻が無い長い一文"),
+    ]
+    assert pieces[2].compression_ratio == 1.2
+
+
+def test_split_phrases_keeps_ascii_and_katakana_fragments():
+    joined = _cue(
+        "きゅうりさんはね自己紹介欄の url から飛んでもらえるとやってることいろいろわかるからそこでフォローしてって",
+        start=0.0,
+        end=4.2,
+        words=(
+            SpeechWord("きゅうりさんはね自己紹介欄の", 0.0, 1.0),
+            SpeechWord(" ur", 1.0, 1.2),
+            SpeechWord("l", 1.2, 1.3),
+            SpeechWord(" から飛んでもらえるとやってる", 1.3, 2.2),
+            SpeechWord("こといろいろわかるからそこで", 2.2, 3.0),
+            SpeechWord("フォ", 3.0, 3.1),
+            SpeechWord("ロー", 3.1, 3.2),
+            SpeechWord("してって", 3.2, 3.5),
+            SpeechWord("スーパー", 3.5, 3.6),
+            SpeechWord("ミラクル", 3.6, 3.7),
+            SpeechWord("ギャラクシー", 3.7, 3.9),
+            SpeechWord("フューチャー", 3.9, 4.2),
+        ),
+    )
+    paused = _cue(
+        "フォロー",
+        start=5.0,
+        end=5.9,
+        words=(SpeechWord("フォ", 5.0, 5.2), SpeechWord("ロー", 5.7, 5.9)),
+    )
+    assert [item.text for item in split_phrases([joined, paused])] == [
+        "きゅうりさんはね自己紹介欄の",
+        "url",
+        "から飛んでもらえるとやってる",
+        "こといろいろわかるからそこで",
+        "フォローしてって",
+        "スーパーミラクルギャラクシーフューチャー",
+        "フォ",
+        "ロー",
+    ]
+
+
+def test_transcribe_splits_word_times_and_drops_unstable_segments(tmp_path):
+    class _Model:
+        def __init__(self):
+            self.kwargs = None
+
+        def transcribe(self, _path, **kwargs):
+            self.kwargs = kwargs
+            return [
+                SimpleNamespace(
+                    start=0.0,
+                    end=5.0,
+                    text="おすすめはマジ大ラブチプラン そんな早く起きてパチ屋にでも行くんかい",
+                    compression_ratio=1.1,
+                    avg_logprob=-0.3,
+                    words=[
+                        SimpleNamespace(word="おすすめはマジ大ラブチプラン", start=0.2, end=2.0),
+                        SimpleNamespace(word=" そんな早く起きてパチ屋にでも行くんかい", start=2.5, end=4.8),
+                    ],
+                ),
+                SimpleNamespace(
+                    start=6.0,
+                    end=7.0,
+                    text="聞き取り不能",
+                    compression_ratio=1.0,
+                    avg_logprob=-1.4,
+                    words=[SimpleNamespace(word="聞き取り不能", start=6.0, end=7.0)],
+                ),
+            ], None
+
+    cues = transcribe(_Model(), tmp_path / "audio.wav", language="ja")
+    assert [(cue.start, cue.end, cue.text) for cue in cues] == [
+        (0.2, 2.0, "おすすめはマジ大ラブチプラン"),
+        (2.5, 4.8, "そんな早く起きてパチ屋にでも行くんかい"),
     ]
 
 

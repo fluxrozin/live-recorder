@@ -21,11 +21,17 @@ def load_whisper(model_name: str, download_root: Path):
 
 
 def transcribe(model, audio_path: Path, *, language: str, hotwords: str | None = None) -> list:
-    from live_recorder.speech.quality import SpeechCue, keep_stable
+    from live_recorder.speech.quality import (
+        SpeechCue,
+        collect_speech_words,
+        keep_stable,
+        split_phrases,
+    )
 
     options: dict = {
         "language": language,
         "vad_filter": True,
+        "word_timestamps": True,
         "temperature": 0.0,
         "condition_on_previous_text": False,
     }
@@ -40,7 +46,8 @@ def transcribe(model, audio_path: Path, *, language: str, hotwords: str | None =
             text=segment.text,
             compression_ratio=float(segment.compression_ratio or 0.0),
             avg_logprob=float(segment.avg_logprob or 0.0),
+            words=collect_speech_words(getattr(segment, "words", None)),
         )
         for segment in segments
     ]
-    return keep_stable(cues, hotwords=cleaned or None)
+    return split_phrases(keep_stable(cues, hotwords=cleaned or None))
