@@ -50,6 +50,11 @@ def test_offline_and_live_come_from_room_status():
     )
     assert offline.status == LiveStatus.OFFLINE
     assert live.status == LiveStatus.LIVE
+    preparing = asyncio.run(
+        check_tiktok("user.name", client=client(Web([Response(200, {"data": {"liveRoom": {"status": 1}}})])))
+    )
+    assert preparing.status == LiveStatus.ERROR
+    assert preparing.error == "room_status_1"
 
 
 def test_empty_403_is_http_status_not_json_error():

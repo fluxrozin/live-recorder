@@ -23,6 +23,7 @@ from live_recorder.comments.segments import (
     comment_export_name,
     comment_sidecar_relatives,
     partition_by_segment,
+    segment_end,
     segment_offset_ms,
 )
 from live_recorder.config import Settings, load_settings
@@ -740,9 +741,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404) from exc
         if not video.is_file():
             raise HTTPException(404)
+        comment_path = video.with_name(comment_export_name(video.name))
         if rows:
             payload, _media = encode_export(rows)
-            video.with_name(comment_export_name(video.name)).write_bytes(payload)
+            comment_path.write_bytes(payload)
+        else:
+            comment_path.unlink(missing_ok=True)
         try:
             written = await asyncio.to_thread(
                 refresh_combined_ass,
@@ -1326,6 +1330,7 @@ def _window(segment) -> ExportSegment:
         number=segment.segment_number,
         file_name=Path(segment.file_path).name,
         started_at=segment.started_at,
+        ended_at=segment_end(segment.started_at, segment.duration_ms, segment.finished_at),
     )
 
 

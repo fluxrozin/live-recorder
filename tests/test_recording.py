@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from live_recorder.recording.commands import pick_tiktok_pull_url, streamlink_tiktok_args
+from live_recorder.recording.commands import (
+    ffmpeg_hls_args,
+    pick_tiktok_pull_url,
+    streamlink_tiktok_args,
+)
 from live_recorder.recording.files import PathEscape, build_segment_path, resolve_stored, safe_token
 from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.policy import (
@@ -65,6 +69,37 @@ def test_filename_uses_platform_user_time_and_title(tmp_path: Path):
 def test_resolve_rejects_escape(tmp_path: Path):
     with pytest.raises(PathEscape):
         resolve_stored(tmp_path, "../secret.mp4")
+
+
+def test_tc_hls_prefers_high_and_skips_other_hosts():
+    from live_recorder.platforms.twitcasting import pick_tc_hls_url
+
+    streams = {
+        "high": "https://evil.example/live.m3u8",
+        "medium": "https://edge.twitcasting.tv/tc.livehls/medium.m3u8",
+        "low": "https://edge.twitcasting.tv/tc.livehls/low.m3u8",
+    }
+    assert pick_tc_hls_url(streams, "best") == "https://edge.twitcasting.tv/tc.livehls/medium.m3u8"
+    assert pick_tc_hls_url(streams, "high") == "https://edge.twitcasting.tv/tc.livehls/medium.m3u8"
+    assert pick_tc_hls_url(streams, "medium") == "https://edge.twitcasting.tv/tc.livehls/medium.m3u8"
+    assert pick_tc_hls_url({"high": streams["medium"]}, "medium") is None
+    assert pick_tc_hls_url({"low": streams["low"]}, "best") == streams["low"]
+
+
+def test_twitcasting_ffmpeg_sends_player_headers_only_when_asked():
+    args = ffmpeg_hls_args(
+        "ffmpeg",
+        "https://edge.twitcasting.tv/live.m3u8",
+        "out.ts",
+        user_agent="Mozilla/5.0",
+        referer="https://twitcasting.tv/",
+    )
+    assert args[args.index("-user_agent") + 1] == "Mozilla/5.0"
+    assert args[args.index("-headers") + 1] == "Referer: https://twitcasting.tv/\r\n"
+    assert args.index("-headers") < args.index("-i")
+    plain = ffmpeg_hls_args("ffmpeg", "https://cdn.example/live.m3u8", "out.ts")
+    assert "-user_agent" not in plain
+    assert "-headers" not in plain
 
 
 def test_streamlink_command_uses_normalized_url():
@@ -136,3 +171,127 @@ def test_scan_finds_missing_unregistered_and_temp(tmp_path: Path):
     assert any(item.endswith("extra.mp4") for item in report.unregistered)
     assert any(item.endswith(".part") for item in report.temporary)
     assert any(item.endswith("clip.mp4") for item in report.suspect)
+
+
+def test_comment_failure_still_has_a_terminal_state():
+    from live_recorder.domain.enums import CommentJobStatus
+    from live_recorder.monitor.jobs import comment_job_result, next_comment_wait
+
+    failed, error = comment_job_result(outcome="stopped", stored_count=3, has_gaps=False, writer_failed=True)
+    assert failed == CommentJobStatus.PARTIAL
+    assert error == "comment_writer_failed"
+    empty, empty_error = comment_job_result(outcome="stopped", stored_count=0, has_gaps=False, writer_failed=True)
+    assert empty == CommentJobStatus.FAILED
+    assert empty_error == "comment_writer_failed"
+    done, clean = comment_job_result(outcome="stopped", stored_count=3, has_gaps=False, writer_failed=False)
+    assert done == CommentJobStatus.COMPLETED
+    assert clean is None
+    assert next_comment_wait(1, "http_403", 300) >= 300
+    assert next_comment_wait(1, "timeout", 0) <= 120
+
+
+async def test_open_live_hls_uses_streamserver_not_api_hls_url():
+    import httpx
+
+    from live_recorder.platforms.twitcasting import TwitCastingClient
+
+    seen: list[str] = []
+    high = "https://203-0-113-10.twitcasting.tv/tc.livehls/v1/streams/1/hls/high/media.m3u8"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        path = request.url.path
+        if path == "/users/caster":
+            return httpx.Response(200, json={"user": {"id": "1"}})
+        if path == "/users/caster/current_live":
+            return httpx.Response(
+                200,
+                json={
+                    "movie": {
+                        "id": "1",
+                        "is_live": True,
+                        "is_protected": False,
+                        "is_membership": False,
+                        "hls_url": "https://twitcasting.tv/caster/metastream.m3u8/?video=1",
+                    }
+                },
+            )
+        if path == "/streamserver.php":
+            assert request.url.params["target"] == "caster"
+            assert request.headers["referer"] == "https://twitcasting.tv/"
+            return httpx.Response(
+                200,
+                json={
+                    "movie": {"id": 1, "live": True},
+                    "tc-hls": {"streams": {"high": high, "low": "https://evil.example/live.m3u8"}},
+                },
+            )
+        if path.endswith("/media.m3u8"):
+            assert request.headers["user-agent"].startswith("Mozilla/5.0")
+            assert request.headers["referer"] == "https://twitcasting.tv/"
+            return httpx.Response(200, text="#EXTM3U\n#EXT-X-VERSION:3\n")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = TwitCastingClient(client_id="id", client_secret="secret", access_token="", client=http)
+        url, reason = await client.open_live_hls("caster", "best")
+    assert reason is None
+    assert url == high
+    assert not any("metastream.m3u8" in item for item in seen)
+
+
+async def test_open_live_hls_rejects_a_closed_playlist_and_protected_live():
+    import httpx
+
+    from live_recorder.platforms.twitcasting import TwitCastingClient
+
+    def closed(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/caster":
+            return httpx.Response(200, json={})
+        if request.url.path == "/users/caster/current_live":
+            return httpx.Response(200, json={"movie": {"id": "1", "is_live": True}})
+        if request.url.path == "/streamserver.php":
+            return httpx.Response(
+                200,
+                json={"tc-hls": {"streams": {"high": "https://edge.twitcasting.tv/live.m3u8"}}},
+            )
+        return httpx.Response(400)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(closed)) as http:
+        client = TwitCastingClient(client_id="id", client_secret="secret", access_token="", client=http)
+        url, reason = await client.open_live_hls("caster", "high")
+    assert url is None
+    assert reason == "playlist http_400"
+
+    def protected(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/caster":
+            return httpx.Response(200, json={})
+        if request.url.path == "/users/caster/current_live":
+            return httpx.Response(200, json={"movie": {"id": "1", "is_live": True, "is_membership": True}})
+        raise AssertionError(request.url.path)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(protected)) as http:
+        client = TwitCastingClient(client_id="id", client_secret="secret", access_token="", client=http)
+        url, reason = await client.open_live_hls("caster", "best")
+    assert url is None
+    assert reason == "access_denied"
+
+
+def test_cancel_stops_the_recording_process():
+    import asyncio
+
+    from live_recorder.recording.process import run_process
+
+    async def run() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(run_process(["sleep", "30"], stop))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, 5)
+        except asyncio.CancelledError:
+            return
+        raise AssertionError("cancel was swallowed")
+
+    asyncio.run(run())

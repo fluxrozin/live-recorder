@@ -121,7 +121,7 @@ def remux_args(ffmpeg: str, source: Path, target: Path, video_codec: str | None)
     # TikTok の FLV は HEVC。MP4 の既定タグ hev1 だと再生できないプレーヤーがある。
     if video_codec == "hevc":
         args.extend(["-tag:v", "hvc1"])
-    args.extend(["-movflags", "+faststart", str(target)])
+    args.extend(["-movflags", "+faststart", "-f", "mp4", str(target)])
     return args
 
 
@@ -150,6 +150,17 @@ class FinalFile:
     size: int
     validation: str
     has_media: bool
+    obsolete: Path | None = None
+
+
+def remux_partial_path(source: Path) -> Path:
+    """既存の MP4 を出力先にしない。検査が通ってから本番名へ移す。"""
+    return source.with_suffix(".mp4.partial")
+
+
+def discard_obsolete(path: Path | None) -> None:
+    if path is not None and path.is_file():
+        path.unlink()
 
 
 async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFile:
@@ -159,29 +170,31 @@ async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFi
         return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, False)
     if source.suffix.lower() == ".mp4" and probed.ok:
         return FinalFile(source, probed.container or "mp4", probed.duration_ms, probed.size, "ok", True)
-    target = _mp4_target(source)
-    remuxed = await remux_to_mp4(ffmpeg, source, target, probed.video_codec)
-    if not remuxed:
-        status = "ok" if probed.ok else "partial"
-        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
-    checked = await probe_file(ffprobe, target)
-    if checked.ok:
-        source.unlink(missing_ok=True)
-        return FinalFile(target, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True)
-    target.unlink(missing_ok=True)
-    status = "ok" if probed.ok else "partial"
-    return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
-
-
-def _mp4_target(source: Path) -> Path:
     target = source.with_suffix(".mp4")
     if target.is_file() and target.stat().st_size == 0:
         target.unlink()
-    if target.exists():
-        target = source.with_name(f"{source.stem}_remux.mp4")
-        if target.is_file() and target.stat().st_size == 0:
-            target.unlink()
-    return target
+    if target.is_file():
+        checked = await probe_file(ffprobe, target)
+        if checked.ok:
+            obsolete = None if target.resolve() == source.resolve() else source
+            return FinalFile(
+                target, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, obsolete
+            )
+    partial = remux_partial_path(source)
+    partial.unlink(missing_ok=True)
+    remuxed = await remux_to_mp4(ffmpeg, source, partial, probed.video_codec)
+    if not remuxed:
+        partial.unlink(missing_ok=True)
+        status = "ok" if probed.ok else "partial"
+        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
+    checked = await probe_file(ffprobe, partial)
+    if not checked.ok:
+        partial.unlink(missing_ok=True)
+        status = "ok" if probed.ok else "partial"
+        return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
+    partial.replace(target)
+    obsolete = None if target.resolve() == source.resolve() else source
+    return FinalFile(target, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, obsolete)
 
 
 def disk_free(path: Path) -> int:

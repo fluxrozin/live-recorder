@@ -161,3 +161,55 @@ def test_replace_session_when_stream_id_changes():
     assert plan.session == "replace"
     assert plan.stop_recording
     assert plan.start_recording
+
+
+def test_monitoring_off_ends_the_open_session():
+    plan = plan_observation(
+        monitoring_enabled=False,
+        recording_enabled=True,
+        comments_enabled=True,
+        comments_global=True,
+        observation=LiveObservation(status=LiveStatus.LIVE, platform_stream_id="1"),
+        has_open_session=True,
+        open_stream_id="1",
+        recording_active=True,
+        comments_active=True,
+        recording_slots_left=1,
+        disk_ok=True,
+    )
+    assert plan.session == "end"
+    assert plan.stop_recording and plan.stop_comments
+    assert not plan.start_recording and not plan.start_comments
+
+
+def test_recording_off_stops_only_the_recording():
+    plan = plan_observation(
+        monitoring_enabled=True,
+        recording_enabled=False,
+        comments_enabled=True,
+        comments_global=True,
+        observation=LiveObservation(status=LiveStatus.LIVE, platform_stream_id="1"),
+        has_open_session=True,
+        open_stream_id="1",
+        recording_active=True,
+        comments_active=True,
+        recording_slots_left=1,
+        disk_ok=True,
+        recording_open=True,
+        comments_open=True,
+    )
+    assert plan.session == "keep"
+    assert plan.stop_recording
+    assert not plan.stop_comments
+    assert not plan.start_recording
+
+
+def test_restart_gap_starts_at_the_captured_end():
+    from datetime import datetime, timedelta, timezone
+
+    from live_recorder.monitor.planner import restart_gap_start
+
+    started = datetime(2026, 11, 11, 1, 0, tzinfo=timezone.utc)
+    now = started + timedelta(hours=2, seconds=10)
+    assert restart_gap_start(started, 7_200_000, now) == started + timedelta(hours=2)
+    assert restart_gap_start(None, None, now) == now

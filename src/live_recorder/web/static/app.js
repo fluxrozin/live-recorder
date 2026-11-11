@@ -502,10 +502,16 @@
     }
   });
 
+  /* 一覧の差し替えはタブが裏のあいだ止める。録画マークだけは続ける。
+     favicon は非アクティブなタブでも href の差し替えが反映される。 */
+  function pausesWhileHidden(elt) {
+    return elt.id !== "recording-state-poll";
+  }
+
   doc.addEventListener("htmx:beforeRequest", function (event) {
     var elt = event.detail.elt;
     if (isPoll(elt)) {
-      if (doc.visibilityState === "hidden" || interactionBlocked(elt)) event.preventDefault();
+      if ((doc.visibilityState === "hidden" && pausesWhileHidden(elt)) || interactionBlocked(elt)) event.preventDefault();
       return;
     }
     closeMenu(false);

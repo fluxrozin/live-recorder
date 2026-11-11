@@ -194,3 +194,27 @@ def test_comments_split_across_segments_and_offsets():
     )
     assert [len(items) for _segment, items in grouped] == [2, 1]
     assert segment_offset_ms(during_first, start) == 219_000
+
+
+def test_comments_during_a_gap_stay_out_of_the_video():
+    start = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+    first_end = datetime(2026, 11, 11, 12, 10, tzinfo=timezone.utc)
+    second_start = datetime(2026, 11, 11, 12, 30, tzinfo=timezone.utc)
+    first = ExportSegment(1, 1, "seg01.mp4", start, first_end)
+    second = ExportSegment(2, 2, "seg02.mp4", second_start, None)
+    during_gap = datetime(2026, 11, 11, 12, 20, tzinfo=timezone.utc)
+    during_first = datetime(2026, 11, 11, 12, 5, tzinfo=timezone.utc)
+    before = datetime(2026, 11, 11, 11, 50, tzinfo=timezone.utc)
+    assert assign_segment(during_gap, [first, second]) is None
+    assert assign_segment(during_first, [first, second]).id == 1
+    assert assign_segment(before, [first, second]).id == 1
+
+
+def test_comment_retention_does_not_list_speech_or_video():
+    from live_recorder.comments.segments import comment_text_relatives
+
+    relatives = comment_text_relatives("tiktok/user/day/clip.ts")
+    assert "tiktok/user/day/clip.ts" not in relatives
+    assert "tiktok/user/day/clip_Speech.srt" not in relatives
+    assert "tiktok/user/day/clip.ass" not in relatives
+    assert "tiktok/user/day/clip_Comments.srt" in relatives

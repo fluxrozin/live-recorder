@@ -83,8 +83,12 @@ class Repository:
         return 0 if current is None else int(current) + 1
 
     async def monitored_streamers(self) -> list[Streamer]:
+        """監視中に加え、切ったあとも開いている配信は終了処理まで巡回する。"""
+        open_ids = select(StreamSession.streamer_id).where(StreamSession.status.in_(("LIVE", "ENDING")))
         result = await self.session.scalars(
-            select(Streamer).where(Streamer.monitoring_enabled.is_(True)).order_by(Streamer.id)
+            select(Streamer)
+            .where(or_(Streamer.monitoring_enabled.is_(True), Streamer.id.in_(open_ids)))
+            .order_by(Streamer.id)
         )
         return list(result)
 
@@ -384,6 +388,25 @@ class Repository:
                 ended_at=ended,
                 reason=reason[:200],
             )
+        )
+
+    async def close_open_gaps(self, session_id: int, job_type: str, ended: datetime) -> None:
+        rows = await self.session.scalars(
+            select(CollectionGap).where(
+                CollectionGap.stream_session_id == session_id,
+                CollectionGap.job_type == job_type,
+                CollectionGap.ended_at.is_(None),
+            )
+        )
+        for gap in rows:
+            gap.ended_at = ended if gap.started_at <= ended else gap.started_at
+
+    async def latest_segment(self, job_id: int) -> RecordingSegment | None:
+        return await self.session.scalar(
+            select(RecordingSegment)
+            .where(RecordingSegment.recording_job_id == job_id, RecordingSegment.file_removed.is_(False))
+            .order_by(RecordingSegment.segment_number.desc())
+            .limit(1)
         )
 
     async def add_event(
@@ -725,9 +748,18 @@ class Repository:
         )
         return list(result)
 
-    async def delete_comments_before(self, older_than: datetime) -> int:
-        result = await self.session.execute(delete(Comment).where(Comment.created_at < older_than))
-        return int(result.rowcount or 0)
+    async def delete_comments_before(self, older_than: datetime) -> tuple[int, set[int]]:
+        result = await self.session.execute(
+            delete(Comment).where(Comment.created_at < older_than).returning(Comment.stream_session_id)
+        )
+        session_ids = list(result.scalars().all())
+        return len(session_ids), set(session_ids)
+
+    async def comment_jobs_for_session(self, session_id: int) -> list[CommentCollectionJob]:
+        result = await self.session.scalars(
+            select(CommentCollectionJob).where(CommentCollectionJob.stream_session_id == session_id)
+        )
+        return list(result)
 
     async def dashboard(self, day_start: datetime) -> dict[str, int]:
         streamers = int(await self.session.scalar(select(func.count()).select_from(Streamer)) or 0)

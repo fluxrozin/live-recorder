@@ -73,9 +73,11 @@ def _room_observation(body: Any) -> LiveObservation:
         code = int(status)
     except (TypeError, ValueError):
         return LiveObservation(status=LiveStatus.ERROR, error="invalid_response")
-    if code != 4:
+    if code == 2:
         return LiveObservation(status=LiveStatus.LIVE)
-    return LiveObservation(status=LiveStatus.OFFLINE)
+    if code == 4:
+        return LiveObservation(status=LiveStatus.OFFLINE)
+    return LiveObservation(status=LiveStatus.ERROR, error=f"room_status_{code}")
 
 
 async def check_tiktok(user_id: str, *, client: Any | None = None, timeout: float = 30) -> LiveObservation:

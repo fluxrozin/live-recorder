@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from live_recorder.timeutil import ensure_aware
@@ -18,6 +18,7 @@ class ExportSegment:
     number: int
     file_name: str
     started_at: datetime
+    ended_at: datetime | None = None
 
 
 def comment_export_name(video_name: str) -> str:
@@ -44,22 +45,42 @@ def comment_sidecar_relatives(video_relative: str) -> list[str]:
     return [(parent / name).as_posix() for name in dict.fromkeys(names)]
 
 
+def comment_text_relatives(video_relative: str) -> list[str]:
+    """コメント本文の副ファイルだけ。統合 ASS と音声字幕は含めない。"""
+    return [relative for relative in comment_sidecar_relatives(video_relative) if not relative.endswith(".ass")]
+
+
+def segment_end(started_at: datetime, duration_ms: int | None, finished_at: datetime | None) -> datetime | None:
+    """字幕の割り当てに使う終了時刻。長さがあればそれを優先する。"""
+    if duration_ms:
+        return ensure_aware(started_at) + timedelta(milliseconds=int(duration_ms))
+    if finished_at is not None:
+        return ensure_aware(finished_at)
+    return None
+
+
 def segment_offset_ms(anchor: datetime, started_at: datetime) -> int:
     return int((ensure_aware(anchor) - ensure_aware(started_at)).total_seconds() * 1000)
 
 
 def assign_segment(anchor: datetime, segments: Sequence[ExportSegment]) -> ExportSegment | None:
-    """コメントを、その時刻以前に始まった最後のセグメントへ入れる。最初のセグメントより前も先頭に含める。"""
+    """コメントを、その時刻を含むセグメントへ入れる。最初より前は先頭に含め、録画の無い区間は外す。"""
     if not segments:
         return None
     moment = ensure_aware(anchor)
     ordered = sorted(segments, key=lambda item: (ensure_aware(item.started_at), item.number, item.id))
-    chosen = ordered[0]
+    if moment < ensure_aware(ordered[0].started_at):
+        return ordered[0]
+    chosen: ExportSegment | None = None
     for item in ordered:
         if ensure_aware(item.started_at) <= moment:
             chosen = item
         else:
             break
+    if chosen is None:
+        return None
+    if chosen.ended_at is not None and moment > ensure_aware(chosen.ended_at):
+        return None
     return chosen
 
 

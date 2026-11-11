@@ -67,21 +67,21 @@ def ytdlp_args(binary: str, url: str, output: str) -> list[str]:
     ]
 
 
-def ffmpeg_hls_args(binary: str, url: str, output: str) -> list[str]:
-    return [
-        binary,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-nostdin",
-        "-i",
-        url,
-        "-c",
-        "copy",
-        "-f",
-        "mpegts",
-        output,
-    ]
+def ffmpeg_hls_args(
+    binary: str,
+    url: str,
+    output: str,
+    *,
+    user_agent: str | None = None,
+    referer: str | None = None,
+) -> list[str]:
+    args = [binary, "-hide_banner", "-loglevel", "warning", "-nostdin"]
+    if user_agent:
+        args.extend(["-user_agent", user_agent])
+    if referer:
+        args.extend(["-headers", f"Referer: {referer}\r\n"])
+    args.extend(["-i", url, "-c", "copy", "-f", "mpegts", output])
+    return args
 
 
 def pick_tiktok_pull_url(room_info: dict[str, Any], quality: str) -> str:

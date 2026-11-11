@@ -9,15 +9,15 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from live_recorder.comments.ass import unlink_combined_ass
-from live_recorder.comments.segments import comment_sidecar_relatives
+from live_recorder.comments.ass import refresh_combined_ass, unlink_combined_ass
+from live_recorder.comments.segments import comment_text_relatives
+from live_recorder.monitor.jobs import _auto_export, close_recording_if_idle, run_comment_job, run_recording_job
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import ensure_runtime, load_runtime
 from live_recorder.db.session import Database
 from live_recorder.domain.enums import CommentJobStatus, LiveStatus, RecordingStatus
-from live_recorder.monitor.jobs import close_recording_if_idle, run_comment_job, run_recording_job
-from live_recorder.monitor.planner import effective_interval, plan_observation
+from live_recorder.monitor.planner import effective_interval, plan_observation, recovery_action, restart_gap_start
 from live_recorder.platforms.tiktok import TikTokChecks
 from live_recorder.platforms.twitcasting import TwitCastingClient
 from live_recorder.platforms.types import LiveObservation
@@ -56,6 +56,7 @@ class Supervisor:
         self.next_ok: dict[int, float] = {}
         self.failures: dict[int, int] = {}
         self.tiktok = TikTokChecks()
+        self.recording_slots = asyncio.Lock()
         self.disk_low = False
         self.worker_id = f"{socket.gethostname()}-{os.getpid()}"
         self.warning = ""
@@ -92,15 +93,27 @@ class Supervisor:
             comments = await repo.unfinished_comment_jobs()
             message, severity = worker_start_notice(len(recordings), len(comments))
             await repo.add_event("worker_restart", message, severity=severity)
+            ended_recordings: list[int] = []
+            open_recordings: list[int] = []
             for job in recordings:
-                await repo.add_gap(job.stream_session_id, "recording", job.started_at or now, now, "worker_restart")
+                stream = await repo.get_session(job.stream_session_id)
+                if stream is not None and stream.status == "ENDED":
+                    ended_recordings.append(job.id)
+                    continue
+                open_recordings.append(job.id)
                 if job.status != RecordingStatus.FINALIZING.value:
                     try:
                         repo.move_recording(job, RecordingStatus.RECONNECTING)
                     except Exception:
                         log.info("could not mark recording %s reconnecting", job.id, exc_info=True)
+            ended_comments: list[int] = []
             for job in comments:
-                await repo.add_gap(job.stream_session_id, "comments", job.started_at or now, now, "worker_restart")
+                stream = await repo.get_session(job.stream_session_id)
+                if stream is not None and stream.status == "ENDED":
+                    ended_comments.append(job.id)
+                    continue
+                started = job.last_received_at or now
+                await repo.add_gap(job.stream_session_id, "comments", started, None, "worker_restart")
                 if job.status != CommentJobStatus.PENDING.value:
                     try:
                         repo.move_comments(job, CommentJobStatus.RECONNECTING)
@@ -114,6 +127,55 @@ class Supervisor:
             await close_recording_if_idle(
                 self.settings, self.db, job_id, RecordingStatus.PARTIAL, finish=False
             )
+        async with self.db.session() as session:
+            repo = Repository(session)
+            for job_id in open_recordings:
+                job = await repo.get_recording_job(job_id)
+                if job is None:
+                    continue
+                segment = await repo.latest_segment(job_id)
+                started = restart_gap_start(
+                    segment.started_at if segment is not None else None,
+                    segment.duration_ms if segment is not None else None,
+                    now,
+                )
+                await repo.add_gap(job.stream_session_id, "recording", started, None, "worker_restart")
+            for job_id in ended_recordings:
+                await self._finish_ended_recording(repo, job_id)
+            for job_id in ended_comments:
+                await self._finish_ended_comments(repo, job_id)
+            await session.commit()
+
+    async def _finish_ended_recording(self, repo: Repository, job_id: int) -> None:
+        job = await repo.get_recording_job(job_id)
+        if job is None or job.status in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
+            if job is not None:
+                await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
+            return
+        has_media = await repo.any_valid_segment(job_id)
+        target = RecordingStatus(recovery_action(still_live=False, has_media=has_media).upper())
+        repo.finish_recording(job, target, "stream ended")
+        await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
+
+    async def _finish_ended_comments(self, repo: Repository, job_id: int) -> None:
+        job = await repo.get_comment_job(job_id)
+        if job is None or job.status in {"COMPLETED", "PARTIAL", "FAILED", "DISABLED"}:
+            if job is not None:
+                await repo.close_open_gaps(job.stream_session_id, "comments", utcnow())
+            return
+        gaps = [gap for gap in await repo.gaps_for_session(job.stream_session_id) if gap.job_type == "comments"]
+        if job.stored_count and not gaps:
+            target = CommentJobStatus.COMPLETED
+        elif job.stored_count or gaps:
+            target = CommentJobStatus.PARTIAL
+        else:
+            target = CommentJobStatus.FAILED
+        try:
+            repo.move_comments(job, target)
+        except Exception:
+            job.status = target.value
+        job.finished_at = utcnow()
+        await repo.close_open_gaps(job.stream_session_id, "comments", utcnow())
 
     async def refresh_engines(self) -> None:
         streamlink = await command_output([self.settings.streamlink_path, "--version"])
@@ -238,6 +300,8 @@ class Supervisor:
                 comments_active=("com", com_id) in self.tasks if com_id else False,
                 recording_slots_left=slots_left,
                 disk_ok=disk_ok,
+                recording_open=rec_id is not None,
+                comments_open=com_id is not None,
             )
             await self.apply(streamer_id, observation, plan)
 
@@ -250,6 +314,7 @@ class Supervisor:
         start_recording = False
         start_comments = False
         session_id: int | None = None
+        idle_recordings: list[tuple[int, RecordingStatus, str, bool]] = []
         async with self.db.session() as session:
             repo = Repository(session)
             streamer = await repo.get_streamer(streamer_id)
@@ -262,12 +327,19 @@ class Supervisor:
                 streamer.last_live_at = utcnow()
             open_session = await repo.open_session(streamer_id)
             if plan.session in {"end", "replace"} and open_session is not None:
-                await self._end_session(
-                    repo,
-                    open_session.id,
-                    cancel=plan.live_status == LiveStatus.DISABLED and observation.status == LiveStatus.LIVE,
+                idle_recordings.extend(
+                    await self._end_session(
+                        repo,
+                        open_session.id,
+                        cancel=plan.live_status == LiveStatus.DISABLED,
+                    )
                 )
                 open_session = None if plan.session == "replace" else await repo.get_session(open_session.id)
+            elif open_session is not None and open_session.status == "LIVE":
+                if plan.stop_recording:
+                    idle_recordings.extend(await self._halt_recording(repo, open_session.id))
+                if plan.stop_comments:
+                    await self._halt_comments(repo, open_session.id)
             if plan.session in {"open", "replace"} and observation.status == LiveStatus.LIVE:
                 created = await repo.create_session(
                     streamer_id=streamer_id,
@@ -306,15 +378,24 @@ class Supervisor:
                 session_id = open_session.id
                 start_recording = plan.start_recording
                 start_comments = plan.start_comments
+        for job_id, target, reason, from_media in idle_recordings:
+            await close_recording_if_idle(
+                self.settings,
+                self.db,
+                job_id,
+                target,
+                reason=reason,
+                from_media=from_media,
+            )
         if session_id and start_recording:
             await self._ensure_recording(session_id)
         if session_id and start_comments:
             await self._ensure_comments(session_id)
 
-    async def _end_session(self, repo: Repository, session_id: int, *, cancel: bool) -> None:
+    async def _end_session(self, repo: Repository, session_id: int, *, cancel: bool) -> list[tuple[int, RecordingStatus, str, bool]]:
         stream = await repo.get_session(session_id)
         if stream is None or stream.status == "ENDED":
-            return
+            return []
         rec = await repo.active_recording(session_id)
         com = await repo.active_comments(session_id)
         stream.status = "ENDED"
@@ -328,18 +409,16 @@ class Supervisor:
             "監視を停止したため収集を終了します" if cancel else "配信終了を検知しました",
             session_id=session_id,
         )
+        idle: list[tuple[int, RecordingStatus, str, bool]] = []
         if rec is not None:
             event = self.events.get(("rec", rec.id))
             if event is not None:
                 event.set()
             elif rec.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
                 if cancel:
-                    target = RecordingStatus.CANCELLED
-                    reason = "monitoring disabled"
+                    idle.append((rec.id, RecordingStatus.CANCELLED, "monitoring disabled", False))
                 else:
-                    target = RecordingStatus.PARTIAL if await repo.any_valid_segment(rec.id) else RecordingStatus.FAILED
-                    reason = "stream ended"
-                repo.finish_recording(rec, target, reason)
+                    idle.append((rec.id, RecordingStatus.PARTIAL, "stream ended", True))
         if com is not None:
             event = self.events.get(("com", com.id))
             if event is not None:
@@ -351,30 +430,73 @@ class Supervisor:
                 except Exception:
                     com.status = target.value
                 com.finished_at = utcnow()
+        ended = utcnow()
+        await repo.close_open_gaps(session_id, "recording", ended)
+        await repo.close_open_gaps(session_id, "comments", ended)
+        return idle
+
+    async def _halt_recording(self, repo: Repository, session_id: int) -> list[tuple[int, RecordingStatus, str, bool]]:
+        rec = await repo.active_recording(session_id)
+        if rec is None or rec.status in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
+            return []
+        rec.cancel_requested = True
+        event = self.events.get(("rec", rec.id))
+        if event is not None:
+            event.set()
+            return []
+        return [(rec.id, RecordingStatus.CANCELLED, "recording disabled", False)]
+
+    async def _halt_comments(self, repo: Repository, session_id: int) -> None:
+        com = await repo.active_comments(session_id)
+        if com is None or com.status in {"COMPLETED", "PARTIAL", "FAILED", "DISABLED"}:
+            return
+        com.cancel_requested = True
+        event = self.events.get(("com", com.id))
+        if event is not None:
+            event.set()
+            return
+        target = CommentJobStatus.PARTIAL if com.stored_count else CommentJobStatus.COMPLETED
+        try:
+            repo.move_comments(com, target)
+        except Exception:
+            com.status = target.value
+        com.finished_at = utcnow()
+        await repo.close_open_gaps(session_id, "comments", utcnow())
 
     async def _ensure_recording(self, session_id: int) -> None:
-        async with self.db.session() as session:
-            repo = Repository(session)
-            existing = await repo.active_recording(session_id)
-            if existing is not None and ("rec", existing.id) in self.tasks:
-                return
-            if existing is not None and existing.status == RecordingStatus.FINALIZING.value:
-                job_id = existing.id
-                await session.commit()
-                await close_recording_if_idle(self.settings, self.db, job_id, RecordingStatus.PARTIAL)
-                return
-            if existing is None:
-                runtime = await load_runtime(session)
-                if await repo.count_active_recordings() >= runtime.max_concurrent_recordings:
+        spawn_id: int | None = None
+        finalize_id: int | None = None
+        async with self.recording_slots:
+            async with self.db.session() as session:
+                repo = Repository(session)
+                existing = await repo.active_recording(session_id)
+                if existing is not None and ("rec", existing.id) in self.tasks:
                     return
-                if not allow_new_recording(disk_free(self.settings.recordings_dir), runtime.min_free_bytes):
-                    await repo.add_event("disk_low", "容量不足のため録画を開始しません", severity="warning", session_id=session_id)
+                if existing is not None and existing.status == RecordingStatus.FINALIZING.value:
+                    finalize_id = existing.id
                     await session.commit()
-                    return
-                existing = await repo.create_recording_job(session_id)
-            job_id = existing.id
-            await session.commit()
-        self._spawn("rec", job_id, run_recording_job)
+                else:
+                    if existing is None:
+                        runtime = await load_runtime(session)
+                        if await repo.count_active_recordings() >= runtime.max_concurrent_recordings:
+                            return
+                        if not allow_new_recording(disk_free(self.settings.recordings_dir), runtime.min_free_bytes):
+                            await repo.add_event(
+                                "disk_low",
+                                "容量不足のため録画を開始しません",
+                                severity="warning",
+                                session_id=session_id,
+                            )
+                            await session.commit()
+                            return
+                        existing = await repo.create_recording_job(session_id)
+                    spawn_id = existing.id
+                    await session.commit()
+        if finalize_id is not None:
+            await close_recording_if_idle(self.settings, self.db, finalize_id, RecordingStatus.PARTIAL)
+            return
+        if spawn_id is not None:
+            self._spawn("rec", spawn_id, run_recording_job)
 
     async def _ensure_comments(self, session_id: int) -> None:
         async with self.db.session() as session:
@@ -394,7 +516,10 @@ class Supervisor:
         if current is not None and not current.done():
             return
         event = self.events.setdefault(key, asyncio.Event())
-        task = asyncio.create_task(runner(self.settings, self.db, self.tc, job_id, event))
+        if kind == "com":
+            task = asyncio.create_task(run_comment_job(self.settings, self.db, self.tc, job_id, event, self.tiktok))
+        else:
+            task = asyncio.create_task(runner(self.settings, self.db, self.tc, job_id, event))
         self.tasks[key] = task
 
         def _done(done: asyncio.Task, key: tuple[str, int] = key) -> None:
@@ -432,25 +557,50 @@ class Supervisor:
                     segment.file_removed = True
                 await repo.add_event("maintenance", "保存期限を過ぎた録画ファイルを削除しました")
             if runtime.comment_retention_days > 0:
-                from sqlalchemy import select
-
-                from live_recorder.db.models import CommentCollectionJob
-
                 cutoff = now - timedelta(days=runtime.comment_retention_days)
-                removed = await repo.delete_comments_before(cutoff)
+                removed, session_ids = await repo.delete_comments_before(cutoff)
                 if removed:
-                    jobs = await session.scalars(
-                        select(CommentCollectionJob).where(CommentCollectionJob.export_path.is_not(None))
+                    for session_id in session_ids:
+                        await self._refresh_comment_retention(repo, session_id, runtime.display_timezone)
+                    await repo.add_event(
+                        "maintenance",
+                        f"期限を過ぎたコメント {removed} 件と、その配信のコメント字幕を更新しました",
                     )
-                    for job in jobs:
-                        if job.export_path:
-                            self._unlink_recorded(job.export_path)
-                            job.export_path = None
-                        for segment in await repo.segments_for_session(job.stream_session_id):
-                            for relative in comment_sidecar_relatives(segment.file_path):
-                                self._unlink_recorded(relative)
-                    await repo.add_event("maintenance", f"期限を過ぎたコメント {removed} 件と自動エクスポートを削除しました")
             await session.commit()
+
+    async def _refresh_comment_retention(self, repo: Repository, session_id: int, tz_name: str) -> None:
+        videos: list[Path] = []
+        for segment in await repo.segments_for_session(session_id):
+            if segment.file_removed:
+                continue
+            for relative in comment_text_relatives(segment.file_path):
+                self._unlink_file(relative)
+            try:
+                videos.append(resolve_stored(self.settings.recordings_dir, segment.file_path))
+            except ValueError:
+                continue
+        jobs = await repo.comment_jobs_for_session(session_id)
+        for job in jobs:
+            if job.export_path:
+                self._unlink_file(job.export_path)
+                job.export_path = None
+        if await repo.comment_count(session_id) and jobs:
+            await _auto_export(self.settings, repo, session_id, jobs[-1], tz_name)
+        for video in videos:
+            if not video.is_file():
+                continue
+            try:
+                refresh_combined_ass(video, ffprobe=self.settings.ffprobe_path)
+            except Exception:
+                log.exception("combined ass failed")
+
+    def _unlink_file(self, relative: str) -> None:
+        try:
+            path = resolve_stored(self.settings.recordings_dir, relative)
+        except ValueError:
+            return
+        if path.is_file():
+            path.unlink()
 
     def _unlink_recorded(self, relative: str) -> None:
         try:

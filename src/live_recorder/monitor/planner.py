@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from live_recorder.domain.enums import LiveStatus
 from live_recorder.platforms.types import LiveObservation
@@ -32,6 +33,8 @@ def plan_observation(
     comments_active: bool,
     recording_slots_left: int,
     disk_ok: bool,
+    recording_open: bool = False,
+    comments_open: bool = False,
 ) -> Plan:
     if not monitoring_enabled:
         return Plan(
@@ -86,13 +89,17 @@ def plan_observation(
         note = "disk_low"
     elif recording_enabled and slots <= 0 and not recording_active:
         note = "recording_limit"
+    stop_recording = (replace and recording_active) or (not recording_enabled and recording_open)
+    stop_comments = (replace and comments_active) or (
+        (not comments_enabled or not comments_global) and comments_open
+    )
     return Plan(
         live_status=LiveStatus.LIVE,
         session=session,
         start_recording=start_recording,
         start_comments=start_comments,
-        stop_recording=replace and recording_active,
-        stop_comments=replace and comments_active,
+        stop_recording=stop_recording,
+        stop_comments=stop_comments,
         note=note,
     )
 
@@ -120,3 +127,15 @@ def recovery_action(*, still_live: bool | None, has_media: bool) -> str:
     if still_live is False:
         return "partial" if has_media else "failed"
     return "wait"
+
+
+def restart_gap_start(
+    segment_started_at: datetime | None, duration_ms: int | None, now: datetime
+) -> datetime:
+    """再起動の欠損は、最後に撮れた時刻から始める。長さが無いときは再起動時刻にする。"""
+    if segment_started_at is not None and duration_ms:
+        start = segment_started_at + timedelta(milliseconds=duration_ms)
+        if start > now:
+            return now
+        return start
+    return now

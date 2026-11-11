@@ -12,17 +12,28 @@ from live_recorder.comments.segments import (
     ExportSegment,
     comment_export_name,
     partition_by_segment,
+    segment_end,
     segment_offset_ms,
 )
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import load_runtime
 from live_recorder.db.session import Database
-from live_recorder.domain.enums import CommentJobStatus, RecordingStatus
+from live_recorder.domain.enums import CommentJobStatus, LiveStatus, RecordingStatus
 from live_recorder.monitor.planner import backoff_seconds
 from live_recorder.platforms.normalize import tiktok_live_url
-from live_recorder.platforms.tiktok import comment_from_event, lookup_room, room_fields
-from live_recorder.platforms.twitcasting import TwitCastingClient
+from live_recorder.platforms.tiktok import (
+    TikTokChecks,
+    comment_from_event,
+    lookup_room,
+    pauses_tiktok_polling,
+    room_fields,
+)
+from live_recorder.platforms.twitcasting import (
+    TWITCASTING_REFERER,
+    TWITCASTING_USER_AGENT,
+    TwitCastingClient,
+)
 from live_recorder.platforms.types import CommentDraft
 from live_recorder.recording.commands import (
     ffmpeg_hls_args,
@@ -32,7 +43,7 @@ from live_recorder.recording.commands import (
     ytdlp_args,
 )
 from live_recorder.recording.files import build_segment_path, relative_to_root, resolve_stored
-from live_recorder.recording.finalize import finalize_recording
+from live_recorder.recording.finalize import discard_obsolete, finalize_recording
 from live_recorder.recording.policy import (
     ACCESS_DENIED,
     INTERRUPTED,
@@ -49,6 +60,31 @@ log = logging.getLogger(__name__)
 SENTINEL = object()
 
 
+def comment_job_result(
+    *, outcome: str, stored_count: int, has_gaps: bool, writer_failed: bool
+) -> tuple[CommentJobStatus, str | None]:
+    """収集の終わり方から終端状態を決める。書き込み失敗は成功扱いにしない。"""
+    if writer_failed and outcome in {"stopped", "ended", "offline"}:
+        outcome = "comment_writer_failed"
+    if outcome == "access_denied":
+        return CommentJobStatus.FAILED, "restricted or age restricted"
+    if stored_count == 0 and outcome not in {"stopped", "ended", "offline"}:
+        return CommentJobStatus.FAILED, outcome[:2000]
+    if has_gaps or outcome not in {"stopped", "ended", "offline"}:
+        status = CommentJobStatus.PARTIAL if stored_count or has_gaps else CommentJobStatus.FAILED
+        error = outcome[:2000] if outcome not in {"stopped", "ended", "offline"} else None
+        return status, error
+    return CommentJobStatus.COMPLETED, None
+
+
+def next_comment_wait(attempt: int, error: str | None, block_remaining: float) -> float:
+    """確認失敗の待ち時間。出口の拒否は休止が明けるまで待つ。"""
+    delay = min(120.0, backoff_seconds(attempt))
+    if pauses_tiktok_polling(error):
+        return max(delay, block_remaining)
+    return delay
+
+
 @dataclass
 class EngineRun:
     kind: str
@@ -62,6 +98,7 @@ class CommentSink:
         self.max_reconnects = max_reconnects
         self.dropped = 0
         self.reconnects = 0
+        self.writer_failed = False
 
     async def add(self, draft: CommentDraft) -> None:
         try:
@@ -91,6 +128,18 @@ async def _resolve_tiktok_url(user_id: str, quality: str, sign_api_key: str) -> 
             log.info("tiktoklive disconnect failed", exc_info=True)
 
 
+async def _resolve_official_hls(
+    tc: TwitCastingClient, user_id: str, quality: str
+) -> tuple[str | None, EngineRun | None]:
+    """プレイリストが開いてから録画を始める。開けないときはセグメントを作らない。"""
+    url, reason = await tc.open_live_hls(user_id, quality)
+    if url:
+        return url, None
+    if reason == "access_denied":
+        return None, EngineRun(ACCESS_DENIED, 0, "this live is protected")
+    return None, EngineRun(INTERRUPTED, 0, reason or "tc-hls missing")
+
+
 async def run_engine(
     *,
     settings: Settings,
@@ -100,7 +149,7 @@ async def run_engine(
     quality: str,
     output: Path,
     stop: asyncio.Event,
-    tc: TwitCastingClient,
+    playlist: str | None = None,
 ) -> EngineRun:
     try:
         if name == "streamlink" and platform == "tiktok":
@@ -111,12 +160,15 @@ async def run_engine(
             url = await _resolve_tiktok_url(user_id, quality, settings.sign_api_key)
             args = ffmpeg_hls_args(settings.ffmpeg_path, url, str(output))
         elif name == "official-hls" and platform == "twitcasting":
-            obs = await tc.current_live(user_id)
-            if obs.restricted:
-                return EngineRun(ACCESS_DENIED, 0, "this live is protected")
-            if not obs.hls_url:
-                return EngineRun(INTERRUPTED, 0, "hls_url missing")
-            args = ffmpeg_hls_args(settings.ffmpeg_path, obs.hls_url, str(output))
+            if not playlist:
+                return EngineRun(INTERRUPTED, 0, "tc-hls missing")
+            args = ffmpeg_hls_args(
+                settings.ffmpeg_path,
+                playlist,
+                str(output),
+                user_agent=TWITCASTING_USER_AGENT,
+                referer=TWITCASTING_REFERER,
+            )
         elif name == "streamlink-hls" and platform == "twitcasting":
             args = streamlink_twitcasting_args(settings.streamlink_path, user_id, str(output), quality)
         else:
@@ -196,27 +248,45 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             engine = order[min(engine_index, len(order) - 1)]
             need_title = False
             opened = False
+            path: Path | None = None
+            segment_id = 0
+            playlist: str | None = None
+            early: EngineRun | None = None
             async with db.session() as session:
                 repo = Repository(session)
                 job = await repo.get_recording_job(job_id)
                 runtime = await load_runtime(session)
                 if job is None or job.cancel_requested:
                     break
-                if job.status == RecordingStatus.STARTING.value:
-                    pass
-                elif job.status == RecordingStatus.RECONNECTING.value:
+                if job.status == RecordingStatus.RECONNECTING.value:
                     repo.move_recording(job, RecordingStatus.STARTING)
                 current = await repo.get_session(session_id)
                 title = current.title if current and current.title else None
                 need_title = platform == "tiktok" and not title and not title_lookup_done
-                if need_title:
-                    await session.commit()
-                else:
+                quality = runtime.recording_quality
+                timezone_name = runtime.display_timezone
+                await session.commit()
+            if need_title:
+                title_lookup_done = True
+                if settings.sign_api_key:
+                    os.environ["SIGN_API_KEY"] = settings.sign_api_key
+                info = await lookup_room(user_id)
+                if info is not None:
+                    await _remember_room(db, session_id, None, info)
+                continue
+            if engine == "official-hls" and platform == "twitcasting":
+                playlist, early = await _resolve_official_hls(tc, user_id, quality)
+            if early is None:
+                async with db.session() as session:
+                    repo = Repository(session)
+                    job = await repo.get_recording_job(job_id)
+                    if job is None or job.cancel_requested:
+                        break
                     number = await repo.next_segment_number(job_id)
                     now = utcnow()
                     from zoneinfo import ZoneInfo
 
-                    local = now.astimezone(ZoneInfo(runtime.display_timezone))
+                    local = now.astimezone(ZoneInfo(timezone_name))
                     path = build_segment_path(
                         root=settings.recordings_dir,
                         platform=platform,
@@ -228,31 +298,26 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     )
                     relative = relative_to_root(settings.recordings_dir, path)
                     segment = await repo.add_segment(job_id, number, relative, now)
+                    await repo.close_open_gaps(session_id, "recording", now)
                     segment_id = segment.id
                     repo.move_recording(job, RecordingStatus.RECORDING)
                     job.recorder_engine = engine
                     await session.commit()
                     opened = True
-            if need_title:
-                title_lookup_done = True
-                if settings.sign_api_key:
-                    os.environ["SIGN_API_KEY"] = settings.sign_api_key
-                info = await lookup_room(user_id)
-                if info is not None:
-                    await _remember_room(db, session_id, None, info)
-                continue
-            if not opened:
-                break
-            outcome = await run_engine(
-                settings=settings,
-                name=engine,
-                platform=platform,
-                user_id=user_id,
-                quality=runtime.recording_quality,
-                output=path,
-                stop=stop,
-                tc=tc,
-            )
+                if not opened or path is None:
+                    break
+                outcome = await run_engine(
+                    settings=settings,
+                    name=engine,
+                    platform=platform,
+                    user_id=user_id,
+                    quality=quality,
+                    output=path,
+                    stop=stop,
+                    playlist=playlist,
+                )
+            else:
+                outcome = early
             last_kind = outcome.kind
             saw_failure = outcome.error
             final_path = path
@@ -261,7 +326,8 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             duration = None
             size = outcome.size
             has_media = False
-            if path.is_file() and path.stat().st_size > 0:
+            obsolete = None
+            if path is not None and path.is_file() and path.stat().st_size > 0:
                 final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
                 final_path = final.path
                 validation = final.validation
@@ -269,32 +335,45 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                 duration = final.duration_ms
                 size = final.size
                 has_media = final.has_media
+                obsolete = final.obsolete
+            drop_segment = opened and size == 0
             async with db.session() as session:
                 repo = Repository(session)
-                segment = await session.get(
-                    __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
-                    segment_id,
-                )
                 job = await repo.get_recording_job(job_id)
-                if segment is not None:
-                    segment.finished_at = utcnow()
-                    segment.file_path = relative_to_root(settings.recordings_dir, final_path)
-                    segment.file_size = size
-                    segment.duration_ms = duration
-                    segment.container_format = container
-                    segment.validation_status = validation
-                    speech_runtime = await load_runtime(session)
-                    assign_speech_queue(
-                        segment,
-                        enabled=speech_runtime.speech_subtitles_enabled,
-                        has_media=has_media,
+                if opened and not drop_segment and final_path is not None:
+                    segment = await session.get(
+                        __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
+                        segment_id,
                     )
+                    if segment is not None:
+                        segment.finished_at = utcnow()
+                        segment.file_path = relative_to_root(settings.recordings_dir, final_path)
+                        segment.file_size = size
+                        segment.duration_ms = duration
+                        segment.container_format = container
+                        segment.validation_status = validation
+                        speech_runtime = await load_runtime(session)
+                        assign_speech_queue(
+                            segment,
+                            enabled=speech_runtime.speech_subtitles_enabled,
+                            has_media=has_media,
+                        )
+                elif drop_segment:
+                    segment = await session.get(
+                        __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
+                        segment_id,
+                    )
+                    if segment is not None:
+                        await session.delete(segment)
                 if job is not None:
                     if outcome.kind == ACCESS_DENIED or (outcome.kind == INTERRUPTED and size < 64 * 1024):
                         await repo.mark_engine(engine, ok=False, reason=outcome.error or outcome.kind)
                     elif size >= 64 * 1024:
                         await repo.mark_engine(engine, ok=True)
                 await session.commit()
+            if drop_segment and path is not None:
+                path.unlink(missing_ok=True)
+            discard_obsolete(obsolete)
             action = next_action(
                 kind=outcome.kind,
                 bytes_written=size,
@@ -355,6 +434,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     has_gaps=bool(recording_gaps),
                 )
             )
+            await repo.close_open_gaps(session_id, "recording", utcnow())
             repo.finish_recording(job, target, None if target == RecordingStatus.COMPLETED else saw_failure)
             if stream is not None and has_media:
                 stream.streamer.last_recording_at = utcnow()
@@ -369,6 +449,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             job = await repo.get_recording_job(job_id)
             if job is not None:
                 repo.finish_recording(job, RecordingStatus.FAILED, "runner crashed")
+                await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
                 await repo.add_event("recording_failed", "録画処理が異常終了しました", severity="error", session_id=job.stream_session_id)
                 await session.commit()
     finally:
@@ -383,9 +464,9 @@ async def _session_id(db: Database, job_id: int) -> int:
         return job.stream_session_id
 
 
-async def _flush_comments(db: Database, session_id: int, job_id: int, drafts: list[CommentDraft], dropped: int) -> None:
+async def _flush_comments(db: Database, session_id: int, job_id: int, drafts: list[CommentDraft], dropped: int) -> bool:
     if not drafts and dropped == 0:
-        return
+        return False
     async with db.session() as session:
         repo = Repository(session)
         stream = await repo.get_session(session_id)
@@ -398,12 +479,17 @@ async def _flush_comments(db: Database, session_id: int, job_id: int, drafts: li
         )
         stored = 0
         duplicates = 0
+        failed = False
         try:
-            stored = await repo.insert_comments(rows)
-            duplicates = max(0, len(rows) - stored)
+            async with session.begin_nested():
+                stored = await repo.insert_comments(rows)
+                duplicates = max(0, len(rows) - stored)
         except Exception:
             log.exception("comment insert failed")
             dropped += len(drafts)
+            stored = 0
+            duplicates = 0
+            failed = True
         job = await repo.get_comment_job(job_id)
         if job is not None:
             job.received_count += len(drafts)
@@ -413,6 +499,7 @@ async def _flush_comments(db: Database, session_id: int, job_id: int, drafts: li
             if drafts:
                 job.last_received_at = drafts[-1].received_at
         await session.commit()
+        return failed
 
 
 async def _batch_writer(db: Database, session_id: int, job_id: int, queue: asyncio.Queue, sink: CommentSink) -> None:
@@ -429,10 +516,20 @@ async def _batch_writer(db: Database, session_id: int, job_id: int, queue: async
         if len(batch) >= 50 or (batch and item is None):
             dropped = sink.dropped
             sink.dropped = 0
-            await _flush_comments(db, session_id, job_id, batch, dropped)
+            try:
+                sink.writer_failed = await _flush_comments(db, session_id, job_id, batch, dropped) or sink.writer_failed
+            except Exception:
+                log.exception("comment batch failed")
+                sink.writer_failed = True
             batch = []
     if batch or sink.dropped:
-        await _flush_comments(db, session_id, job_id, batch, sink.dropped)
+        try:
+            sink.writer_failed = (
+                await _flush_comments(db, session_id, job_id, batch, sink.dropped) or sink.writer_failed
+            )
+        except Exception:
+            log.exception("comment batch failed")
+            sink.writer_failed = True
         sink.dropped = 0
 
 
@@ -452,7 +549,14 @@ async def _remember_room(db: Database, session_id: int, room_id: str | None, inf
         await session.commit()
 
 
-async def _collect_tiktok(user_id: str, stop: asyncio.Event, sink: CommentSink, sign_api_key: str, on_room) -> str:
+async def _collect_tiktok(
+    user_id: str,
+    stop: asyncio.Event,
+    sink: CommentSink,
+    sign_api_key: str,
+    on_room,
+    checks: TikTokChecks,
+) -> str:
     if sign_api_key:
         os.environ["SIGN_API_KEY"] = sign_api_key
     from TikTokLive import TikTokLiveClient
@@ -473,12 +577,22 @@ async def _collect_tiktok(user_id: str, stop: asyncio.Event, sink: CommentSink, 
             await sink.add(draft)
 
     while not stop.is_set():
-        try:
-            live = await asyncio.wait_for(client.is_live(), 30)
-        except Exception as exc:
-            return type(exc).__name__
-        if not live:
+        observation = await checks.check(user_id)
+        if observation.status == LiveStatus.OFFLINE:
             return "offline"
+        if observation.status != LiveStatus.LIVE:
+            sink.reconnects += 1
+            detail = observation.error or "check_failed"
+            if sink.reconnects > sink.max_reconnects:
+                return detail
+            try:
+                await asyncio.wait_for(
+                    stop.wait(),
+                    next_comment_wait(sink.reconnects, observation.error, checks.block_remaining()),
+                )
+            except TimeoutError:
+                continue
+            continue
         connect_task = asyncio.create_task(client.connect(fetch_room_info=True))
         stop_task = asyncio.create_task(stop.wait())
         await asyncio.wait({connect_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -546,7 +660,14 @@ async def _collect_twitcasting(
     return "stopped"
 
 
-async def run_comment_job(settings: Settings, db: Database, tc: TwitCastingClient, job_id: int, stop: asyncio.Event) -> None:
+async def run_comment_job(
+    settings: Settings,
+    db: Database,
+    tc: TwitCastingClient,
+    job_id: int,
+    stop: asyncio.Event,
+    checks: TikTokChecks | None = None,
+) -> None:
     async with db.session() as session:
         repo = Repository(session)
         job = await repo.get_comment_job(job_id)
@@ -573,11 +694,15 @@ async def run_comment_job(settings: Settings, db: Database, tc: TwitCastingClien
     sink = CommentSink(queue, runtime.reconnect_max_attempts)
     writer = asyncio.create_task(_batch_writer(db, session_id, job_id, queue, sink))
     outcome = "failed"
+    writer_failed = False
+    tiktok_checks = checks if checks is not None else TikTokChecks()
     try:
         async with db.session() as session:
-            job = await Repository(session).get_comment_job(job_id)
+            repo = Repository(session)
+            job = await repo.get_comment_job(job_id)
             if job is not None:
-                Repository(session).move_comments(job, CommentJobStatus.COLLECTING)
+                repo.move_comments(job, CommentJobStatus.COLLECTING)
+                await repo.close_open_gaps(session_id, "comments", utcnow())
                 await session.commit()
         if platform == "tiktok":
             outcome = await _collect_tiktok(
@@ -586,6 +711,7 @@ async def run_comment_job(settings: Settings, db: Database, tc: TwitCastingClien
                 sink,
                 settings.sign_api_key,
                 lambda room_id, info: _remember_room(db, session_id, room_id, info),
+                tiktok_checks,
             )
         else:
             if not movie_id:
@@ -614,7 +740,11 @@ async def run_comment_job(settings: Settings, db: Database, tc: TwitCastingClien
         outcome = type(exc).__name__
     finally:
         await queue.put(SENTINEL)
-        await writer
+        try:
+            await writer
+        except Exception:
+            log.exception("comment writer failed")
+            writer_failed = True
         watcher.cancel()
     async with db.session() as session:
         repo = Repository(session)
@@ -623,25 +753,20 @@ async def run_comment_job(settings: Settings, db: Database, tc: TwitCastingClien
             return
         job.reconnect_count = sink.reconnects
         gaps = [gap for gap in await repo.gaps_for_session(session_id) if gap.job_type == "comments"]
-        if outcome == "access_denied":
-            target = CommentJobStatus.FAILED
-            job.last_error = "restricted or age restricted"
-        elif job.stored_count == 0 and outcome not in {"stopped", "ended", "offline"}:
-            target = CommentJobStatus.FAILED
-            job.last_error = outcome[:2000]
-        elif gaps or outcome not in {"stopped", "ended", "offline"}:
-            target = CommentJobStatus.PARTIAL if job.stored_count or gaps else CommentJobStatus.FAILED
-            if outcome not in {"stopped", "ended", "offline"}:
-                job.last_error = outcome[:2000]
-        else:
-            target = CommentJobStatus.COMPLETED
-        if job.status == CommentJobStatus.CONNECTING.value and target == CommentJobStatus.COLLECTING:
-            pass
+        target, error = comment_job_result(
+            outcome=outcome,
+            stored_count=job.stored_count,
+            has_gaps=bool(gaps),
+            writer_failed=writer_failed or sink.writer_failed,
+        )
+        if error:
+            job.last_error = error
         try:
             repo.move_comments(job, target)
         except Exception:
             job.status = target.value
         job.finished_at = utcnow()
+        await repo.close_open_gaps(session_id, "comments", utcnow())
         runtime = await load_runtime(session)
         if runtime.auto_export_on_complete and target in {CommentJobStatus.COMPLETED, CommentJobStatus.PARTIAL}:
             await _auto_export(settings, repo, session_id, job, runtime.display_timezone)
@@ -708,6 +833,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                 number=segment.segment_number,
                 file_name=Path(segment.file_path).name,
                 started_at=segment.started_at,
+                ended_at=segment_end(segment.started_at, segment.duration_ms, segment.finished_at),
             )
             for segment in stored
         ]
@@ -720,11 +846,13 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
             )
             by_id = {segment.id: segment for segment in stored}
             for window, grouped in groups:
-                if not grouped:
-                    continue
                 segment = by_id[window.id]
                 video = resolve_stored(settings.recordings_dir, segment.file_path)
                 target = video.with_name(comment_export_name(window.file_name))
+                if not grouped:
+                    target.unlink(missing_ok=True)
+                    _refresh_ass(video, settings.ffprobe_path)
+                    continue
                 rows = [
                     _comment_row(
                         comment,
@@ -757,8 +885,16 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
 
 
 async def close_recording_if_idle(
-    settings: Settings, db: Database, job_id: int, target: RecordingStatus, *, finish: bool = True
+    settings: Settings,
+    db: Database,
+    job_id: int,
+    target: RecordingStatus,
+    *,
+    finish: bool = True,
+    reason: str | None = None,
+    from_media: bool = False,
 ) -> None:
+    obsolete: list[Path] = []
     async with db.session() as session:
         repo = Repository(session)
         job = await repo.get_recording_job(job_id)
@@ -784,11 +920,22 @@ async def close_recording_if_idle(
                 segment.container_format = final.container
                 segment.validation_status = final.validation
                 has_media = final.has_media
+                if final.obsolete is not None:
+                    obsolete.append(final.obsolete)
             else:
                 segment.validation_status = "invalid"
                 segment.file_size = 0
             segment.finished_at = utcnow()
             assign_speech_queue(segment, enabled=speech_enabled, has_media=has_media)
         if finish and job.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
-            repo.finish_recording(job, target, "worker restarted" if target != RecordingStatus.COMPLETED else None)
+            chosen = target
+            if from_media:
+                has_media = await repo.any_valid_segment(job_id)
+                chosen = RecordingStatus.PARTIAL if has_media else RecordingStatus.FAILED
+            if reason is None:
+                reason = None if chosen == RecordingStatus.COMPLETED else "worker restarted"
+            repo.finish_recording(job, chosen, reason)
+            await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
         await session.commit()
+    for path in obsolete:
+        discard_obsolete(path)

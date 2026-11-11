@@ -107,6 +107,22 @@ def test_hevc_remux_uses_hvc1_tag(tmp_path: Path):
     assert hevc[-1] == str(target)
 
 
+def test_remux_partial_is_not_an_existing_recording(tmp_path: Path):
+    from live_recorder.recording.finalize import remux_partial_path
+
+    source = tmp_path / "clip.ts"
+    existing = tmp_path / "clip.mp4"
+    alternate = tmp_path / "clip_remux.mp4"
+    existing.write_bytes(b"keep")
+    alternate.write_bytes(b"also")
+    partial = remux_partial_path(source)
+    assert partial == tmp_path / "clip.mp4.partial"
+    assert partial != existing
+    assert partial != alternate
+    assert existing.read_bytes() == b"keep"
+    assert alternate.read_bytes() == b"also"
+
+
 async def test_failed_remux_removes_empty_mp4(tmp_path: Path):
     source = tmp_path / "seg.ts"
     source.write_bytes(b"\x00" * 2048)

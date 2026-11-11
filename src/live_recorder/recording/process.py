@@ -52,9 +52,12 @@ async def run_process(args: list[str], stop: asyncio.Event, *, kill_after: float
         stderr=asyncio.subprocess.PIPE,
     )
     stderr_task = asyncio.create_task(_read_limited(proc.stderr))
+    cancelled = False
+    stopped = stop.is_set()
     try:
         while proc.returncode is None:
             if stop.is_set():
+                stopped = True
                 await _shutdown(proc, kill_after)
                 break
             try:
@@ -63,9 +66,39 @@ async def run_process(args: list[str], stop: asyncio.Event, *, kill_after: float
                 continue
         if proc.returncode is None:
             await proc.wait()
-    finally:
-        stderr = await stderr_task
-    return ProcessResult(returncode=proc.returncode, stderr=stderr, stopped=stop.is_set())
+    except asyncio.CancelledError:
+        cancelled = True
+        await _shutdown_after_cancel(proc, stderr_task)
+        raise
+    if not cancelled:
+        try:
+            stderr = await asyncio.wait_for(stderr_task, 5)
+        except TimeoutError:
+            stderr_task.cancel()
+            stderr = ""
+    else:
+        stderr = ""
+    return ProcessResult(returncode=proc.returncode, stderr=stderr, stopped=stopped or stop.is_set())
+
+
+async def _shutdown_after_cancel(proc: asyncio.subprocess.Process, stderr_task: asyncio.Task[str]) -> None:
+    """キャンセル中でも子プロセスを止める。Python 3.12 では待機の前にキャンセルを一旦外す。"""
+    task = asyncio.current_task()
+    if task is not None:
+        while task.uncancel():
+            pass
+    try:
+        await _shutdown(proc, 5)
+    except Exception:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    if not stderr_task.done():
+        stderr_task.cancel()
+    try:
+        await asyncio.wait_for(stderr_task, 2)
+    except (asyncio.CancelledError, TimeoutError, Exception):
+        pass
 
 
 async def command_output(args: list[str], timeout: float = 8) -> str:

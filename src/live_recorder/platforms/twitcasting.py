@@ -18,6 +18,14 @@ from live_recorder.timeutil import utcnow
 log = logging.getLogger(__name__)
 
 API_BASE = "https://apiv2.twitcasting.tv"
+STREAM_SERVER = "https://twitcasting.tv/streamserver.php"
+TWITCASTING_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+TWITCASTING_REFERER = "https://twitcasting.tv/"
+_TC_HLS_BEST = ("high", "medium", "low")
+_TC_HLS_MEDIUM = ("medium", "low")
 
 
 class RateLimiter:
@@ -50,6 +58,17 @@ def validate_hls_url(url: str | None) -> str | None:
     if host != "twitcasting.tv" and not host.endswith(".twitcasting.tv"):
         return None
     return url
+
+
+def pick_tc_hls_url(streams: dict[str, Any], quality: str) -> str | None:
+    """配信プレイヤーと同じ tc-hls から、画質設定に合う HTTPS のプレイリストを選ぶ。"""
+    order = _TC_HLS_MEDIUM if quality == "medium" else _TC_HLS_BEST
+    for name in order:
+        raw = streams.get(name)
+        chosen = validate_hls_url(raw if isinstance(raw, str) else None)
+        if chosen:
+            return chosen
+    return None
 
 
 def comment_from_api(item: dict[str, Any], received_at: datetime | None = None) -> CommentDraft:
@@ -115,12 +134,64 @@ class TwitCastingClient:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
 
-    async def _request(self, method: str, path: str, params: dict[str, object] | None = None) -> httpx.Response:
+    def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=20)
             self._owns_client = True
+        return self._client
+
+    async def _request(self, method: str, path: str, params: dict[str, object] | None = None) -> httpx.Response:
         await self.limiter.acquire()
-        return await self._client.request(method, f"{API_BASE}{path}", headers=self.headers(), params=params)
+        return await self._ensure_client().request(method, f"{API_BASE}{path}", headers=self.headers(), params=params)
+
+    async def _player_get(self, url: str, *, params: dict[str, str] | None = None, accept: str) -> httpx.Response:
+        headers = {
+            "User-Agent": TWITCASTING_USER_AGENT,
+            "Referer": TWITCASTING_REFERER,
+            "Accept": accept,
+        }
+        return await self._ensure_client().get(url, params=params, headers=headers, follow_redirects=True)
+
+    async def open_live_hls(self, user_id: str, quality: str) -> tuple[str | None, str | None]:
+        """開けた tc-hls の URL を返す。失敗時は URL なしと理由。合言葉と会員配信は拒否する。"""
+        observation = await self.current_live(user_id)
+        if observation.restricted:
+            return None, "access_denied"
+        normalized = normalize_twitcasting(user_id)
+        try:
+            response = await self._player_get(
+                STREAM_SERVER,
+                params={"target": normalized, "mode": "client", "player": "pc_web"},
+                accept="application/json",
+            )
+        except httpx.HTTPError as exc:
+            log.info("twitcasting streamserver failed: %s", type(exc).__name__)
+            return None, type(exc).__name__
+        if response.status_code != 200:
+            return None, f"streamserver http_{response.status_code}"
+        try:
+            body = response.json()
+        except ValueError:
+            return None, "invalid_json"
+        block = body.get("tc-hls") if isinstance(body, dict) else None
+        streams = block.get("streams") if isinstance(block, dict) else None
+        chosen = pick_tc_hls_url(streams if isinstance(streams, dict) else {}, quality)
+        if not chosen:
+            return None, "tc-hls missing"
+        try:
+            playlist = await self._player_get(chosen, accept="*/*")
+        except httpx.HTTPError as exc:
+            log.info("twitcasting playlist failed: %s", type(exc).__name__)
+            return None, type(exc).__name__
+        if playlist.status_code != 200:
+            return None, f"playlist http_{playlist.status_code}"
+        opened = validate_hls_url(str(playlist.url))
+        if opened is None:
+            return None, "playlist host rejected"
+        text = playlist.text[:200].lstrip("\ufeff \t\r\n")
+        if not text.startswith("#EXTM3U"):
+            return None, "playlist is not hls"
+        return opened, None
 
     async def user_exists(self, user_id: str) -> LiveObservation | None:
         normalized = normalize_twitcasting(user_id)

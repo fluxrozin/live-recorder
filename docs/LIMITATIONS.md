@@ -12,7 +12,7 @@
 | TikTok 録画 TikTokLive + FFmpeg | ルーム情報に含まれる HTTPS の配信 URL だけをコピー。署名サービスが必要。実配信は未検証 |
 | TikTok コメント | `CommentEvent` の実在フィールドだけを保存。Euler Stream への署名要求が起きる。実配信は未検証 |
 | ツイキャス配信状態とコメント | 公式 API。認証情報が必要。実配信は未検証 |
-| ツイキャス録画 | 公式 `hls_url` を優先し、無い公開配信だけ Streamlink の HLS。WebSocket 低遅延配信は使わない。実配信は未検証 |
+| ツイキャス録画 | `streamserver.php` の tc-hls を FFmpeg で優先し、プレイリストが開いてからセグメントを作る。取れない公開配信だけ Streamlink の HLS。WebSocket 低遅延配信は使わない。実配信は未検証 |
 
 ## 取得しないもの
 
