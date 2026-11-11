@@ -42,6 +42,7 @@ $fx = Split-Path $csc
     /resource:"$out\idle.ico",idle.ico `
     /resource:"$out\recording.ico",recording.ico `
     /resource:"$out\stopped.ico",stopped.ico `
+    /resource:"$out\busy.ico",busy.ico `
     /out:"$out\LiveRecorderTray.exe" `
     (Join-Path $here "TrayApp.cs")
 if ($LASTEXITCODE -ne 0) { throw "csc failed" }

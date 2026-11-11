@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FAVICON = ROOT / "src" / "live_recorder" / "web" / "static" / "favicon.svg"
 FAVICON_RECORDING = ROOT / "src" / "live_recorder" / "web" / "static" / "favicon-recording.svg"
 STOPPED_FILL = "#9aa0b4"
+BUSY_FILL = "#e0a100"
 SIZES = (16, 32, 48)
 
 
@@ -192,9 +193,11 @@ def write_tray_icons(out: Path) -> None:
     idle = parse_mark(FAVICON)
     recording = parse_mark(FAVICON_RECORDING)
     stopped = replace(idle, fill=STOPPED_FILL)
+    busy = replace(idle, fill=BUSY_FILL)
     write_ico(out / "idle.ico", render_sizes(idle))
     write_ico(out / "recording.ico", render_sizes(recording))
     write_ico(out / "stopped.ico", render_sizes(stopped))
+    write_ico(out / "busy.ico", render_sizes(busy))
 
 
 def main() -> None:

@@ -29,6 +29,7 @@ def test_tray_icons_match_favicon_colors(tmp_path):
     assert recording.fill == "#cc2f68"
     assert module.parse_hex(idle.dot) == (255, 255, 255)
     assert module.STOPPED_FILL == "#9aa0b4"
+    assert module.BUSY_FILL == "#e0a100"
 
     # 32px の画素中心 (1.5, 16.5) は角丸の地、(16.5, 16.5) は白円の中。
     assert _pixel(module, tmp_path / "idle.ico", 32, 1, 16) == (0x4D, 0x63, 0xD9, 255)
@@ -38,6 +39,8 @@ def test_tray_icons_match_favicon_colors(tmp_path):
     assert _pixel(module, tmp_path / "recording.ico", 32, 16, 16) == (255, 255, 255, 255)
     assert _pixel(module, tmp_path / "stopped.ico", 32, 1, 16) == (0x9A, 0xA0, 0xB4, 255)
     assert _pixel(module, tmp_path / "stopped.ico", 32, 16, 16) == (255, 255, 255, 255)
+    assert _pixel(module, tmp_path / "busy.ico", 32, 1, 16) == (0xE0, 0xA1, 0x00, 255)
+    assert _pixel(module, tmp_path / "busy.ico", 32, 16, 16) == (255, 255, 255, 255)
 
     for size in (16, 48):
         assert _pixel(module, tmp_path / "idle.ico", size, size // 2, size // 2)[3] == 255

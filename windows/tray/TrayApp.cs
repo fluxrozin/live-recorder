@@ -109,6 +109,7 @@ sealed class TrayContext : ApplicationContext
     readonly Icon _iconIdle;
     readonly Icon _iconRecording;
     readonly Icon _iconStopped;
+    readonly Icon _iconBusy;
     readonly TrayConfig _config;
     bool _busy;
     bool _polling;
@@ -131,6 +132,7 @@ sealed class TrayContext : ApplicationContext
         _iconIdle = LoadIcon("idle.ico");
         _iconRecording = LoadIcon("recording.ico");
         _iconStopped = LoadIcon("stopped.ico");
+        _iconBusy = LoadIcon("busy.ico");
         _config = LoadConfig();
 
         _start = new ToolStripMenuItem("起動");
@@ -449,7 +451,9 @@ sealed class TrayContext : ApplicationContext
     void ShowIcon()
     {
         Icon icon = _iconStopped;
-        if (_healthOk && _recording) icon = _iconRecording;
+        bool starting = _upPending || (_running > 0 && !_healthOk);
+        if (_busy || _exitRequested || starting) icon = _iconBusy;
+        else if (_healthOk && _recording) icon = _iconRecording;
         else if (_healthOk) icon = _iconIdle;
         _notify.Icon = icon;
         _notify.Text = Tip(_tip);
