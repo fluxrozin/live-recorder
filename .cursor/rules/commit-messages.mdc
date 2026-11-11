@@ -1,0 +1,46 @@
+---
+description: コミットメッセージは英語で Conventional Commits の形式にする
+alwaysApply: true
+---
+
+# コミットメッセージ
+
+件名と本文は英語で書く。形式は Conventional Commits に従う。
+
+```
+<type>: <description>
+
+<body>
+```
+
+`<scope>` は必要なときだけ `<type>(<scope>): <description>` と付ける。
+
+## 件名
+
+- `type` は次のいずれか: `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`
+- `description` は命令形・現在形にする。`add tray autostart` とし、`added` や `adds` は使わない。
+- 先頭は小文字にし、末尾にピリオドを付けない。
+- 件名全体は 100 文字以内にする。
+- 変更の内容を書く。理由は収まるときだけ件名に入れる。
+
+## 本文
+
+- 件名と本文の間に空行を 1 行入れる。
+- 72 文字で折り返す。
+- なぜ変更したかを書く。ファイルごとの変更一覧にはしない。
+- 件名だけで足りるときは本文を省略する。
+
+## 例
+
+```
+feat: add tray autostart so recordings resume after reboot
+```
+
+```
+fix: stop counting resent comments as new events
+
+The detail view treated resent comment IDs as fresh
+events, so the received count no longer matched the list.
+```
+
+日本語、過去形（`Fixed the dedup bug.`）、件名末尾のピリオド、空行のない本文は避ける。
