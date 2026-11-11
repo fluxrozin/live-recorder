@@ -163,6 +163,7 @@ class CommentCollectionJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     received_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     stored_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     error_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     reconnect_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text)

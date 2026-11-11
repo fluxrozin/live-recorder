@@ -613,6 +613,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "comment_status": comment_job.status if comment_job else "NONE",
                 "comment_received": comment_job.received_count if comment_job else 0,
                 "comment_stored": comment_job.stored_count if comment_job else 0,
+                "comment_duplicates": comment_job.duplicate_count if comment_job else 0,
                 "comment_errors": comment_job.error_count if comment_job else 0,
                 "comment_reconnects": comment_job.reconnect_count if comment_job else 0,
                 "comment_error": comment_job.last_error if comment_job else "",

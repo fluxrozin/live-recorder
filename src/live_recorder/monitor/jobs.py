@@ -397,8 +397,10 @@ async def _flush_comments(db: Database, session_id: int, job_id: int, drafts: li
             drafts=drafts,
         )
         stored = 0
+        duplicates = 0
         try:
             stored = await repo.insert_comments(rows)
+            duplicates = max(0, len(rows) - stored)
         except Exception:
             log.exception("comment insert failed")
             dropped += len(drafts)
@@ -406,6 +408,7 @@ async def _flush_comments(db: Database, session_id: int, job_id: int, drafts: li
         if job is not None:
             job.received_count += len(drafts)
             job.stored_count += stored
+            job.duplicate_count += duplicates
             job.error_count += dropped
             if drafts:
                 job.last_received_at = drafts[-1].received_at

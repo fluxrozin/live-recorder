@@ -368,6 +368,7 @@ def recording_detail_context(scenario: str) -> dict:
         "comment_status": "COMPLETED",
         "comment_received": 15320,
         "comment_stored": 15301,
+        "comment_duplicates": 19,
         "comment_errors": 19,
         "comment_reconnects": 2,
         "comment_error": "",
