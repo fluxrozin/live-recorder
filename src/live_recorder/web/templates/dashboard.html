@@ -28,7 +28,10 @@
   <span class="c-health-strip__sep u-hide-sm" aria-hidden="true"></span>
   <span class="c-health-strip__item">ワーカー {{ ui.status("health", worker.state) }}<span class="u-muted">{{ worker.last_seen_at|ago if worker.last_seen_at else "応答記録なし" }}</span></span>
   <span class="c-health-strip__item">最終監視 {{ ui.time(last_checked, tz) }}</span>
-  <span class="c-health-strip__item">警告・エラー（24時間） <strong class="u-num">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</strong></span>
+  <span class="c-health-strip__item">警告・エラー（24時間） <strong class="u-num">{{ errors|length }}{% if errors_more %}+{% endif %}</strong></span>
+  {% if overall[0] != "ok" %}
+  <a class="c-health-strip__link" href="{{ '/system#events' if worker.state == 'ok' and storage_tone != 'danger' else '/system' }}">システム状態で確認</a>
+  {% endif %}
 </section>
 
 <section class="c-metrics c-metrics--5" aria-label="主要指標">
@@ -137,7 +140,7 @@
     {% if errors %}
     <section class="c-card" aria-labelledby="errors-title">
       <header class="c-card__header">
-        <h2 class="c-card__title" id="errors-title">{{ ui.icon("triangle-alert") }}直近24時間の警告・エラー <span class="c-count c-count--warning">{{ errors|length }}{% if errors|length >= 8 %}+{% endif %}</span></h2>
+        <h2 class="c-card__title" id="errors-title">{{ ui.icon("triangle-alert") }}直近24時間の警告・エラー <span class="c-count c-count--warning">{{ errors|length }}{% if errors_more %}+{% endif %}</span></h2>
         <div class="c-card__actions"><a class="c-btn c-btn--ghost c-btn--sm" href="/system#events">履歴{{ ui.icon("chevron-right", "sm") }}</a></div>
       </header>
       <ul class="c-event-list">

@@ -19,7 +19,9 @@
 {%- endmacro %}
 
 {% macro app_mark(recording_active, mark_id, oob=False) -%}
-<span id="{{ mark_id }}" class="c-logo{% if mark_id == 'app-mark-bar' %} l-topbar__mark{% endif %}{% if recording_active %} is-recording{% endif %}" data-recording="{{ 'on' if recording_active else 'off' }}" role="img" aria-label="{{ '録画中' if recording_active else '待機中' }}"{% if oob %} hx-swap-oob="outerHTML"{% endif %}><span class="c-logo__dot"></span></span>
+{%- set mark = "unknown" if recording_active is none else ("on" if recording_active else "off") -%}
+{%- set label = "状態不明" if mark == "unknown" else ("録画中" if mark == "on" else "待機中") -%}
+<span id="{{ mark_id }}" class="c-logo{% if mark_id == 'app-mark-bar' %} l-topbar__mark{% endif %}{% if mark == 'on' %} is-recording{% elif mark == 'unknown' %} is-unknown{% endif %}" data-recording="{{ mark }}" role="img" aria-label="{{ label }}"{% if oob %} hx-swap-oob="outerHTML"{% endif %}><span class="c-logo__dot"></span></span>
 {%- endmacro %}
 
 {% macro sidebar(active) -%}

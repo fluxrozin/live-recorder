@@ -145,6 +145,11 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 }
 .c-logo.is-recording { background: var(--live); }
 .c-logo.is-recording .c-logo__dot { animation: lr-record 1.4s ease-in-out infinite; }
+.c-logo.is-unknown {
+  background: var(--warning-subtle);
+  color: var(--warning);
+  box-shadow: inset 0 0 0 1px var(--warning-border);
+}
 .l-topbar__mark { display: none; }
 
 @keyframes lr-record {
@@ -589,6 +594,8 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .c-table .is-shrink { width: 1%; white-space: nowrap; }
 .c-table .is-actions { width: 1%; text-align: right; white-space: nowrap; }
 .c-row-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); flex-wrap: nowrap; }
+.c-table td.is-wrap { white-space: normal; }
+.c-table td.is-wrap .c-row-actions { flex-wrap: wrap; max-width: 16rem; }
 .c-row-actions form { display: contents; }
 .c-table__primary { font-weight: var(--fw-medium); color: var(--text); }
 .c-table__secondary { font-size: var(--fs-caption); color: var(--text-tertiary); }
@@ -1313,6 +1320,7 @@ textarea.c-input {
 .c-health-strip__item { display: inline-flex; align-items: center; gap: var(--sp-2); white-space: nowrap; }
 .c-health-strip__item strong { color: var(--text); font-weight: var(--fw-medium); }
 .c-health-strip__sep { width: 1px; height: 16px; background: var(--border-strong); }
+.c-health-strip__link { margin-left: auto; font-weight: var(--fw-medium); white-space: nowrap; }
 
 .c-session-list { display: flex; flex-direction: column; }
 .c-session {
@@ -1452,6 +1460,7 @@ tr.is-muted .c-streamer__name { color: var(--text-secondary); }
 
 /* ===== Settings ===== */
 .l-settings { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--sp-8); align-items: start; }
+.c-settings-jump { display: none; flex-direction: column; gap: 6px; }
 .c-settings-nav { position: sticky; top: calc(var(--topbar-height) + var(--sp-6)); display: flex; flex-direction: column; gap: 2px; }
 .c-settings-nav .c-tab {
   height: 34px;
@@ -1649,10 +1658,9 @@ tr.is-muted .c-streamer__name { color: var(--text-secondary); }
   .c-filter-more { padding-left: var(--sp-4); padding-right: var(--sp-4); }
   .c-filter-bar .c-search { flex-basis: 100%; }
   .c-danger-row { flex-direction: column; align-items: stretch; padding: var(--sp-4); }
-  .c-settings-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: visible; border-bottom: 0; gap: var(--sp-2); }
-  .c-settings-nav .c-tab { justify-content: center; padding: 0 var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
-  .c-settings-nav .c-tab[aria-selected="true"] { background: var(--accent-subtle); border-color: var(--accent-border); color: var(--text); }
-  .c-settings-nav .c-tab[aria-selected="true"]::after { display: none; }
+  .c-settings-nav { display: none; }
+  .c-settings-jump { display: flex; }
+  .c-table--stack td.is-wrap .c-row-actions { max-width: none; justify-content: flex-start; }
   .c-card__actions--wide { margin-left: 0; width: 100%; }
   .c-card__actions--wide .c-segmented { width: 100%; }
 
@@ -1753,6 +1761,31 @@ tr.is-muted .c-streamer__name { color: var(--text-secondary); }
 @media (hover: none) {
   .c-table tbody tr:hover,
   .c-comment:hover { background: transparent; }
+}
+
+@media (pointer: coarse) {
+  .c-icon-btn,
+  .c-btn--sm,
+  .c-grip,
+  .c-menu__item {
+    position: relative;
+  }
+  .c-icon-btn::before,
+  .c-btn--sm::before,
+  .c-grip::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--tap-target);
+    height: var(--tap-target);
+    transform: translate(-50%, -50%);
+  }
+  .c-menu__item { min-height: var(--tap-target); }
+  .c-switch { min-height: var(--tap-target); min-width: var(--tap-target); }
+  .c-switch-input { width: 44px; height: 26px; }
+  .c-switch-input::after { width: 20px; height: 20px; }
+  .c-switch-input:checked::after { transform: translateX(18px); }
 }
 
 @media (prefers-reduced-motion: reduce) {

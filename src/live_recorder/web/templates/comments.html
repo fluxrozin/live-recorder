@@ -4,7 +4,7 @@
 {% block content %}
 {% set eyebrow %}{{ ui.platform(session.platform) }}<span class="u-subtle">· #{{ session.id }}</span>{% endset %}
 {% call ui.page_header(session.name, session.title, eyebrow=eyebrow) %}
-  <a class="c-btn" href="/comments?streamer_id={{ session.streamer_id }}">{{ ui.icon("film") }}録画一覧</a>
+  <a class="c-btn" href="/recordings/{{ session.id }}">{{ ui.icon("film") }}録画詳細</a>
 {% endcall %}
 
 {%- set advanced_keys = ["user_id", "nickname", "start", "end"] -%}

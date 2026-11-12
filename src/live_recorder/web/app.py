@@ -205,12 +205,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         return templates.TemplateResponse(request, name, context, status_code=status_code)
 
-    async def _recording_active(request: Request) -> bool:
+    async def _recording_active(request: Request) -> bool | None:
+        """録画の有無。取得できないときは None とし、待機中とは分けて表示する。"""
         try:
             async with request.app.state.db.session() as session:
                 return await Repository(session).count_active_recordings() > 0
         except Exception:
-            return False
+            return None
 
     async def require_user(request: Request) -> RedirectResponse | None:
         uid = request.session.get("uid")
@@ -270,7 +271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             runtime = await load_runtime(session)
             stats = await repo.dashboard(start_of_local_day(runtime.display_timezone))
             recent = await repo.recent_sessions(8)
-            errors = await repo.recent_errors(8)
+            errors = await repo.recent_errors(9)
             by_streamer = await repo.bytes_by_streamer()
             cards = []
             for item in recent:
@@ -286,10 +287,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                 )
             since = utcnow() - timedelta(hours=24)
+            in_window = [event for event in errors if ensure_aware(event.created_at) >= since]
+            errors_more = len(in_window) > 8
             error_rows = [
                 {"created_at": event.created_at, "message": event.message, "severity": event.severity}
-                for event in errors
-                if ensure_aware(event.created_at) >= since
+                for event in in_window[:8]
             ]
             active = await _active_sessions(session)
             worker = _worker_health(await repo.latest_heartbeat())
@@ -303,6 +305,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stats=stats,
             cards=cards,
             errors=error_rows,
+            errors_more=errors_more,
             free=free,
             total=total,
             used=(total - free) if free is not None and total is not None else None,

@@ -121,6 +121,11 @@ def test_recording_mark_follows_active_recordings():
     partial = render("partials/recording_state.html", fx.base_context(recording_active=True))
     assert partial.count('hx-swap-oob="outerHTML"') == 2
     assert 'id="app-mark"' in partial and 'id="app-mark-bar"' in partial
+    unknown = render("dashboard.html", {**fx.dashboard_context("normal"), "recording_active": None})
+    assert 'data-recording="unknown"' in unknown
+    assert 'aria-label="状態不明"' in unknown
+    assert "is-unknown" in unknown
+    assert "is-recording" not in unknown
 
 
 def test_login_page_has_no_shell():
@@ -350,10 +355,11 @@ def test_segment_download_only_when_file_exists():
     assert "統合字幕のスタイルは Speech と Comment です" in html
     assert "/segments/2/speech" not in html
     assert 'href="/speech?session_id=101"' in html
+    assert "字幕の処理" in html
     assert "音声字幕 (SRT)" in html
     assert 'href="/speech/cues?session_id=101"' in html
     assert "字幕を見る" in html
-    assert ">コメント</a>" in html
+    assert "コメント (SRT)" in html
     assert "<dt>重複</dt><dd" in html and ">19 件</dd>" in html
     assert "受信 / 保存" not in html
     assert 'action="/speech/' not in html
@@ -496,6 +502,9 @@ def test_settings_restore_open_tab_after_validation_error():
     assert re.search(r'id="tab-tiktok"[^>]*aria-selected="true"', html)
     assert re.search(r'id="tab-general"[^>]*aria-selected="false"', html)
     assert re.search(r'name="active_tab"[^>]*value="settings-tiktok"', html)
+    page = render_page("settings.html", "normal")
+    assert 'data-settings-jump' in page
+    assert "期限が 0（無期限）のときは削除しません。" in page
 
 
 def test_environment_values_are_read_only_and_hide_secrets():
@@ -599,7 +608,10 @@ def test_dashboard_metrics_include_speech_in_progress():
 
 def test_dashboard_errors_only_when_present():
     assert "直近24時間の警告・エラー" not in render_page("dashboard.html", "normal")
-    assert "直近24時間の警告・エラー" in render_page("dashboard.html", "stress")
+    stress = render_page("dashboard.html", "stress")
+    assert "直近24時間の警告・エラー" in stress
+    assert "システム状態で確認" in stress
+    assert stress.count("8+") == 0
 
 
 def test_flash_renders_as_toast_and_inline_alert():

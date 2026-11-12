@@ -59,6 +59,14 @@
 <form method="post" action="/settings" class="l-settings" data-tabs data-tabs-hash data-dirty-form data-busy aria-label="設定">
   {{ ui.csrf_input() }}
   <input type="hidden" name="active_tab" value="{{ current_tab }}">
+  <div class="c-settings-jump" hidden>
+    <label class="c-label" for="settings-jump">カテゴリ</label>
+    <select class="c-select" id="settings-jump" data-settings-jump>
+      {% for key, label, en, icon_name in sections %}
+      <option value="settings-{{ key }}"{% if current_tab == "settings-" ~ key or (not current_tab and loop.first) %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
   <div class="c-settings-nav" role="tablist" aria-label="設定カテゴリ" aria-orientation="vertical" hidden>
     {% for key, label, en, icon_name in sections %}
     <button type="button" class="c-tab" role="tab" id="tab-{{ key }}" aria-controls="settings-{{ key }}" aria-selected="{{ 'true' if current_tab == 'settings-' ~ key or (not current_tab and loop.first) else 'false' }}">
@@ -104,7 +112,7 @@
       </div>
       {{ number_setting("min_free_gib", "最低空き容量", (runtime.min_free_bytes / 1073741824)|round(0, 'floor')|int, "保存先の空き容量がこの値を下回ると、新しい録画を開始しません。", "GiB", min=0, step=1) }}
       {{ number_setting("retention_days", "録画の保存期限", runtime.retention_days, "録画ファイルを保存しておく日数です。0 は無期限です。", "日", min=0) }}
-      {{ switch_setting("auto_delete_enabled", "期限切れ録画の自動削除", runtime.auto_delete_enabled, "保存期限を過ぎた録画ファイルを自動で削除します。") }}
+      {{ switch_setting("auto_delete_enabled", "期限切れ録画の自動削除", runtime.auto_delete_enabled, "保存期限を過ぎた録画ファイルを自動で削除します。期限が 0（無期限）のときは削除しません。") }}
     </section>
 
     <section class="c-card" id="settings-tiktok" role="tabpanel" aria-labelledby="settings-tiktok-title">

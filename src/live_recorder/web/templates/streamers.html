@@ -20,9 +20,9 @@
   {% if rows %}
   <div class="c-toolbar">
     <p class="c-toolbar__summary">
-      <span><strong id="streamer-count">{{ rows|length }}</strong> 件</span>
-      <span aria-hidden="true">·</span><span>配信中 <strong>{{ live_n }}</strong></span>
-      <span aria-hidden="true">·</span><span>監視停止 <strong>{{ paused_n }}</strong></span>
+      <span><strong id="streamer-count" data-total="{{ rows|length }}">{{ rows|length }}</strong> 件</span>
+      <span aria-hidden="true">·</span><span>全体の配信中 <strong>{{ live_n }}</strong></span>
+      <span aria-hidden="true">·</span><span>全体の監視停止 <strong>{{ paused_n }}</strong></span>
       {% if error_n %}<span aria-hidden="true">·</span><span class="c-status c-status--danger">{{ ui.icon("circle-x") }}エラー {{ error_n }}</span>{% endif %}
     </p>
     <form class="c-segmented" method="post" action="/streamers/order" role="group" aria-label="並び順"

@@ -475,7 +475,48 @@
     if (window.scrollY !== state.scrollY) window.scrollTo(0, state.scrollY);
   }
 
-  var pendingRestore = null;
+  var pollState = new WeakMap();
+  var toggleState = new WeakMap();
+
+  function focusMarker(el) {
+    if (!el || el === doc.body || el === doc.documentElement || !el.getAttribute) return null;
+    if (el.id) return { id: el.id };
+    var href = el.getAttribute("href");
+    if (href) return { href: href };
+    var label = el.getAttribute("aria-label");
+    if (label) return { label: label };
+    return null;
+  }
+
+  function restoreFocus(root, marker) {
+    if (!root || !marker) return;
+    var active = doc.activeElement;
+    if (active && active !== doc.body && active !== doc.documentElement && doc.contains(active)) return;
+    var el = null;
+    if (marker.id) {
+      el = doc.getElementById(marker.id);
+      if (el && !root.contains(el)) el = null;
+    }
+    if (!el && marker.href) {
+      var links = $all("a[href]", root);
+      for (var i = 0; i < links.length; i++) {
+        if (links[i].getAttribute("href") === marker.href) {
+          el = links[i];
+          break;
+        }
+      }
+    }
+    if (!el && marker.label) {
+      var nodes = $all("button, a", root);
+      for (var j = 0; j < nodes.length; j++) {
+        if (nodes[j].getAttribute("aria-label") === marker.label) {
+          el = nodes[j];
+          break;
+        }
+      }
+    }
+    if (el) el.focus({ preventScroll: true });
+  }
 
   doc.addEventListener("htmx:configRequest", function (event) {
     var token = doc.querySelector('meta[name="csrf-token"]');
@@ -517,8 +558,6 @@
     closeMenu(false);
   });
 
-  var pendingToggle = null;
-
   doc.addEventListener("htmx:beforeSwap", function (event) {
     var xhr = event.detail.xhr;
     if (isLoginRedirect(xhr)) {
@@ -530,22 +569,25 @@
     if (isPoll(source)) {
       if (interactionBlocked(source)) {
         event.detail.shouldSwap = false;
-        pendingRestore = null;
       } else {
         var live = event.detail.target;
-        pendingRestore = { id: live && live.id, state: captureLiveState(live) };
+        var active = doc.activeElement;
+        pollState.set(xhr, {
+          id: live && live.id,
+          state: captureLiveState(live),
+          focus: live && active && live.contains(active) ? focusMarker(active) : null,
+        });
       }
     }
-    source = event.detail.requestConfig && event.detail.requestConfig.elt;
     if (source && source.hasAttribute && source.hasAttribute("data-toggle") && xhr.status === 200) {
       var previous = source.querySelector("[role='switch']");
-      pendingToggle = {
+      toggleState.set(xhr, {
         rowId: source.getAttribute("data-row"),
         field: source.getAttribute("data-field"),
         label: source.getAttribute("data-label"),
         name: source.getAttribute("data-name"),
         wasOn: !!(previous && previous.getAttribute("aria-checked") === "true"),
-      };
+      });
     }
   });
 
@@ -570,9 +612,10 @@
 
   doc.addEventListener("htmx:afterSettle", function (event) {
     var request = event.detail.requestConfig && event.detail.requestConfig.elt;
-    if (pendingToggle) {
-      var info = pendingToggle;
-      pendingToggle = null;
+    var xhr = event.detail.xhr;
+    var info = xhr && toggleState.get(xhr);
+    if (info) {
+      toggleState.delete(xhr);
       var row = doc.getElementById(info.rowId);
       if (row) {
         var sw = row.querySelector('[data-field="' + info.field + '"] [role="switch"]');
@@ -601,6 +644,10 @@
       return;
     }
     var message = requestErrorMessage(xhr);
+    if (elt && elt.id === "recording-state-poll") {
+      setRecordingMark("unknown");
+      return;
+    }
     if (elt && elt.hasAttribute && elt.hasAttribute("data-poll")) {
       var status = $("[data-poll-status]", elt);
       if (status) {
@@ -682,9 +729,23 @@
         var panelId = tab.getAttribute("aria-controls") || "";
         var remembered = $("input[name='active_tab']", container);
         if (remembered) remembered.value = panelId;
+        var jump = $("[data-settings-jump]", container);
+        if (jump && jump.value !== panelId) jump.value = panelId;
         if (useHash && !keepHash && window.history.replaceState) {
           window.history.replaceState(null, "", "#" + panelId);
         }
+      }
+
+      container._lrSelectTab = select;
+      var jumpWrap = $(".c-settings-jump", container);
+      if (jumpWrap) jumpWrap.hidden = false;
+      var jumpControl = $("[data-settings-jump]", container);
+      if (jumpControl && !jumpControl.hasAttribute("data-ready")) {
+        jumpControl.setAttribute("data-ready", "");
+        jumpControl.addEventListener("change", function () {
+          var next = $('[aria-controls="' + jumpControl.value + '"]', container);
+          if (next) select(next, true);
+        });
       }
 
       var initial = tabs[0];
@@ -720,6 +781,122 @@
     });
   }
 
+  /* 非表示タブの入力は、ブラウザがフォーカスできず保存が黙って止まる。
+     最初の不正項目のタブを開いてから、理由をその欄に出す。 */
+  function fieldLabel(field) {
+    if (!field.id) return "この項目";
+    var label = doc.querySelector('label[for="' + field.id + '"]');
+    if (!label) return "この項目";
+    return label.textContent.replace(/\s+/g, " ").trim();
+  }
+
+  function fieldUnit(field) {
+    var group = field.closest(".c-input-group");
+    var addon = group && $(".c-input-group__addon", group);
+    return addon ? addon.textContent.trim() : "";
+  }
+
+  function constraintMessage(field) {
+    var label = fieldLabel(field);
+    var validity = field.validity;
+    var unit = fieldUnit(field);
+    if (validity.valueMissing) return label + "を入力してください";
+    if (validity.rangeUnderflow) return label + "は" + field.min + unit + "以上で入力してください";
+    if (validity.rangeOverflow) return label + "は" + field.max + unit + "以下で入力してください";
+    if (validity.patternMismatch) return label + "の形式が正しくありません";
+    if (validity.stepMismatch) return label + "は指定された刻みで入力してください";
+    if (validity.badInput || validity.typeMismatch) return label + "の値が正しくありません";
+    return field.validationMessage || label + "を確認してください";
+  }
+
+  function showConstraintError(field) {
+    var message = constraintMessage(field);
+    field.setAttribute("aria-invalid", "true");
+    if (!field.id) return message;
+    var id = field.id + "-client-error";
+    var existing = doc.getElementById(id);
+    if (!existing) {
+      existing = doc.createElement("p");
+      existing.className = "c-field-error";
+      existing.id = id;
+      existing.setAttribute("role", "alert");
+      var anchor = field.closest(".c-setting__control") || field.parentNode;
+      anchor.appendChild(existing);
+    }
+    existing.textContent = message;
+    var described = (field.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    if (described.indexOf(id) === -1) {
+      described.push(id);
+      field.setAttribute("aria-describedby", described.join(" "));
+    }
+    return message;
+  }
+
+  function clearConstraintError(field) {
+    if (!field.id) {
+      field.removeAttribute("aria-invalid");
+      return;
+    }
+    var id = field.id + "-client-error";
+    var existing = doc.getElementById(id);
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    var described = (field.getAttribute("aria-describedby") || "").split(/\s+/).filter(function (token) {
+      return token && token !== id;
+    });
+    if (described.length) field.setAttribute("aria-describedby", described.join(" "));
+    else field.removeAttribute("aria-describedby");
+    field.removeAttribute("aria-invalid");
+  }
+
+  function initConstraintTabs(root) {
+    $all("form[data-dirty-form]", root).forEach(function (form) {
+      if (form.hasAttribute("data-constraint-ready")) return;
+      form.setAttribute("data-constraint-ready", "");
+      var pending = null;
+      var reporting = false;
+      form.addEventListener(
+        "invalid",
+        function (event) {
+          if (reporting) return;
+          var field = event.target;
+          var panel = field.closest("[role='tabpanel']");
+          var hidden = !!(panel && panel.hidden);
+          if (hidden) event.preventDefault();
+          if (pending) return;
+          pending = { field: field, hidden: hidden };
+          window.setTimeout(function () {
+            var job = pending;
+            pending = null;
+            if (!job) return;
+            var target = job.field;
+            if (job.hidden && form._lrSelectTab) {
+              var tab = $('[aria-controls="' + target.closest("[role='tabpanel']").id + '"]', form);
+              if (tab) form._lrSelectTab(tab, false, false);
+            }
+            var message = showConstraintError(target);
+            var statusText = $("[data-savebar-text]", form);
+            if (statusText) statusText.textContent = message;
+            target.scrollIntoView({ block: "center" });
+            target.focus({ preventScroll: true });
+            if (job.hidden && typeof target.reportValidity === "function") {
+              reporting = true;
+              try {
+                target.reportValidity();
+              } finally {
+                reporting = false;
+              }
+            }
+          }, 0);
+        },
+        true
+      );
+      form.addEventListener("input", function (event) {
+        var field = event.target;
+        if (field.checkValidity && field.checkValidity()) clearConstraintError(field);
+      });
+    });
+  }
+
   /* ===== Settings: unsaved changes ===== */
   function fieldValue(el) {
     if (el.type === "checkbox" || el.type === "radio") return el.checked ? "1" : "0";
@@ -728,7 +905,7 @@
 
   function initDirtyForms() {
     $all("form[data-dirty-form]").forEach(function (form) {
-      var fields = $all("input:not([type='hidden']), select, textarea", form);
+      var fields = $all("input:not([type='hidden']), select:not([data-settings-jump]), textarea", form);
       var initial = new Map();
       fields.forEach(function (el) {
         initial.set(el, fieldValue(el));
@@ -788,19 +965,25 @@
 
   /* ===== Client-side list filters ===== */
   function applyTextFilter(input) {
-    var container = doc.querySelector(input.getAttribute("data-filter-target"));
+    var target = input.getAttribute("data-filter-target");
+    var container = target ? doc.querySelector(target) : null;
     if (!container) return;
     var query = input.value.trim().toLowerCase();
     var shown = 0;
     $all("[data-search]", container).forEach(function (item) {
-      var match = !query || item.getAttribute("data-search").toLowerCase().indexOf(query) !== -1;
+      var haystack = item.getAttribute("data-search") || "";
+      var match = !query || haystack.toLowerCase().indexOf(query) !== -1;
       item.hidden = !match;
       if (match) shown += 1;
     });
     var empty = $("[data-filter-empty]", container.parentNode);
     if (empty) empty.hidden = shown !== 0;
-    var counter = doc.querySelector(input.getAttribute("data-filter-count") || "");
-    if (counter) counter.textContent = String(shown);
+    var countSelector = input.getAttribute("data-filter-count");
+    var counter = countSelector ? doc.querySelector(countSelector) : null;
+    if (counter) {
+      var total = counter.getAttribute("data-total");
+      counter.textContent = query && total ? shown + " / " + total : String(shown);
+    }
   }
 
   doc.addEventListener("input", function (event) {
@@ -828,6 +1011,18 @@
     if (!button) return;
     applySegFilter(button.closest("[data-seg-filter]"), button.getAttribute("data-value"));
   });
+
+  function setRecordingMark(state) {
+    ["app-mark", "app-mark-bar"].forEach(function (id) {
+      var mark = doc.getElementById(id);
+      if (!mark) return;
+      mark.setAttribute("data-recording", state);
+      mark.classList.toggle("is-recording", state === "on");
+      mark.classList.toggle("is-unknown", state === "unknown");
+      mark.setAttribute("aria-label", state === "on" ? "録画中" : state === "unknown" ? "状態不明" : "待機中");
+    });
+    syncFavicon();
+  }
 
   function syncFavicon() {
     var link = doc.getElementById("favicon");
@@ -1002,14 +1197,25 @@
     if (status && name) status.textContent = name.textContent.trim() + "の位置を変更しました";
   }
 
-  var reorderRequest = 0;
   var reorderSettling = false;
+  var reorderSending = false;
+  var reorderPendingIds = null;
 
-  function saveReorder(body) {
-    var requestId = ++reorderRequest;
+  function refreshStreamers() {
+    doc.documentElement.removeAttribute("data-order-pending");
+    var poll = doc.getElementById("streamers-poll");
+    if (poll && window.htmx) window.htmx.trigger(poll, "lr:refresh");
+  }
+
+  /* 保存は1本ずつ送る。失敗したときは、その後の操作が無ければサーバーの順序へ戻す。 */
+  function pumpReorder() {
+    if (reorderSending || !reorderPendingIds) return;
+    var ids = reorderPendingIds;
+    reorderPendingIds = null;
+    reorderSending = true;
     doc.documentElement.setAttribute("data-order-pending", "");
     var token = (doc.querySelector('meta[name="csrf-token"]') || {}).content || "";
-    var bodyText = reorderIds(body)
+    var bodyText = ids
       .map(function (id) {
         return "id=" + encodeURIComponent(id);
       })
@@ -1020,24 +1226,54 @@
       body: bodyText,
     })
       .then(function (response) {
-        if (requestId !== reorderRequest) return;
-        doc.documentElement.removeAttribute("data-order-pending");
-        if (response.ok) return;
-        var stale = response.status === 409;
+        reorderSending = false;
+        if (reorderPendingIds) {
+          pumpReorder();
+          return;
+        }
+        if (response.ok) {
+          doc.documentElement.removeAttribute("data-order-pending");
+          return;
+        }
         toast(
-          stale
+          response.status === 409
             ? "一覧が変わっていたため、並び順を保存できませんでした"
             : "並び順を保存できませんでした",
           "danger"
         );
-        var poll = doc.getElementById("streamers-poll");
-        if (poll && window.htmx) window.htmx.trigger(poll, "lr:refresh");
+        refreshStreamers();
       })
       .catch(function () {
-        if (requestId !== reorderRequest) return;
-        doc.documentElement.removeAttribute("data-order-pending");
+        reorderSending = false;
+        if (reorderPendingIds) {
+          pumpReorder();
+          return;
+        }
         toast("並び順を保存できませんでした。ネットワークを確認してください", "danger");
+        refreshStreamers();
       });
+  }
+
+  function saveReorder(body) {
+    reorderPendingIds = reorderIds(body);
+    doc.documentElement.setAttribute("data-order-pending", "");
+    pumpReorder();
+  }
+
+  function focusReorderHandle(row) {
+    var handle = row.querySelector("[data-reorder-handle]");
+    if (!handle) return;
+    function place() {
+      if (doc.activeElement === handle) return;
+      if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement !== doc.documentElement) return;
+      handle.focus({ preventScroll: true });
+    }
+    handle.focus({ preventScroll: true });
+    row.addEventListener("transitionend", function onEnd(event) {
+      if (event.target !== row || event.propertyName !== "transform") return;
+      row.removeEventListener("transitionend", onEnd);
+      place();
+    });
   }
 
   function endReorderDrag(commit) {
@@ -1048,7 +1284,7 @@
     releaseReorderPointer(state.pointerId);
     doc.body.classList.remove("is-reordering");
     if (!state.active) {
-      doc.documentElement.removeAttribute("data-order-pending");
+      if (!reorderSending && !reorderPendingIds) doc.documentElement.removeAttribute("data-order-pending");
       return;
     }
     var changed = reorderRows(state.body).some(function (row, index) {
@@ -1072,7 +1308,7 @@
         saveReorder(state.body);
         return;
       }
-      doc.documentElement.removeAttribute("data-order-pending");
+      if (!reorderSending && !reorderPendingIds) doc.documentElement.removeAttribute("data-order-pending");
     });
   }
 
@@ -1208,6 +1444,7 @@
       if (event.key === "ArrowUp") sibling.before(row);
       else sibling.after(row);
     });
+    focusReorderHandle(row);
     announceReorder(row);
     saveReorder(body);
   });
@@ -1217,6 +1454,7 @@
     initTheme();
     initDialogs(doc);
     initTabs(doc);
+    initConstraintTabs(doc);
     initDirtyForms();
     $all("[data-toast]").forEach(armToast);
     $all("button[type='submit']").forEach(syncAckButton);
@@ -1231,15 +1469,20 @@
 
   doc.addEventListener("htmx:afterSwap", function (event) {
     var source = event.detail.requestConfig && event.detail.requestConfig.elt;
+    var xhr = event.detail.xhr;
     if (isPoll(source)) source.setAttribute("data-poll-at", String(Date.now()));
-    if (isPoll(source) && pendingRestore && pendingRestore.id) {
-      restoreLiveState(doc.getElementById(pendingRestore.id), pendingRestore.state);
+    var saved = xhr && pollState.get(xhr);
+    if (isPoll(source) && saved && saved.id) {
+      var restored = doc.getElementById(saved.id);
+      restoreLiveState(restored, saved.state);
+      restoreFocus(restored, saved.focus);
     }
-    pendingRestore = null;
-    if (pendingToggle && source && source.hasAttribute && source.hasAttribute("data-toggle")) {
-      var row = doc.getElementById(pendingToggle.rowId);
-      var sw = row && row.querySelector('[data-field="' + pendingToggle.field + '"] [role="switch"]');
-      if (sw) animateSwitch(sw, pendingToggle.wasOn);
+    if (xhr) pollState.delete(xhr);
+    var tog = xhr && toggleState.get(xhr);
+    if (tog) {
+      var row = doc.getElementById(tog.rowId);
+      var sw = row && row.querySelector('[data-field="' + tog.field + '"] [role="switch"]');
+      if (sw) animateSwitch(sw, tog.wasOn);
     }
     var target = event.detail.target;
     var current = (target && target.id && doc.getElementById(target.id)) || target;

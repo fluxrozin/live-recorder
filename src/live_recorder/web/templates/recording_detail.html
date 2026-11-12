@@ -16,7 +16,7 @@
   <a class="c-btn" href="/comments?session_id={{ detail.id }}">{{ ui.icon("message-square-text") }}コメントを見る<span class="c-count">{{ "{:,}".format(detail.comments_total) }}</span></a>
   <a class="c-btn" href="/speech/cues?session_id={{ detail.id }}">{{ ui.icon("file-text") }}字幕を見る<span class="c-count">{{ "{:,}".format(detail.speech_cue_count) }}</span></a>
   <a class="c-btn" href="/comments/export?session_id={{ detail.id }}&amp;format=srt" download>{{ ui.icon("download") }}コメント (SRT)</a>
-  <a class="c-btn" href="/speech?session_id={{ detail.id }}">{{ ui.icon("download") }}音声字幕 (SRT)</a>
+  <a class="c-btn" href="/speech?session_id={{ detail.id }}">{{ ui.icon("activity") }}字幕の処理</a>
 {% endcall %}
 
 <div class="u-row u-row--wrap">
@@ -128,21 +128,29 @@
               {% endif %}
             </div>
           </td>
-          <td class="is-actions is-span">
+          <td class="is-actions is-span is-wrap">
+            <div class="c-row-actions">
             {% if segment.removed %}
             <span class="c-status c-status--neutral">{{ ui.icon("trash-2") }}削除済み</span>
             {% elif not segment.exists %}
             <span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}ファイルなし</span>
-            {% else %}
-            {% if segment.finished_at %}
+            {% elif segment.finished_at %}
             <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/download" download aria-label="{{ segment.name }} の動画をダウンロード（{{ segment.size|bytes }}）">{{ ui.icon("download", "sm") }}動画</a>
             {% endif %}
-            <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/ass" download aria-label="セグメント {{ segment.number }} の統合字幕をダウンロード">{{ ui.icon("download", "sm") }}統合 (ASS)</a>
+            {% if (segment.exists and not segment.removed) or segment.speech_ready %}
+            {% call ui.menu_button("seg-sub-" ~ segment.id, "字幕", variant="sm") %}
+              {% if segment.exists and not segment.removed %}
+              <a class="c-menu__item" role="menuitem" href="/recordings/segments/{{ segment.id }}/ass" download aria-label="セグメント {{ segment.number }} の統合字幕をダウンロード">{{ ui.icon("download", "sm") }}統合 (ASS)</a>
+              {% endif %}
+              <a class="c-menu__item" role="menuitem" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=srt" download aria-label="セグメント {{ segment.number }} のコメントをダウンロード">{{ ui.icon("download", "sm") }}コメント (SRT)</a>
+              {% if segment.speech_ready %}
+              <a class="c-menu__item" role="menuitem" href="/recordings/segments/{{ segment.id }}/speech" download aria-label="セグメント {{ segment.number }} の音声字幕をダウンロード">{{ ui.icon("download", "sm") }}音声字幕 (SRT)</a>
+              {% endif %}
+            {% endcall %}
+            {% else %}
+            <a class="c-btn c-btn--sm" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=srt" download aria-label="セグメント {{ segment.number }} のコメントをダウンロード">{{ ui.icon("download", "sm") }}コメント (SRT)</a>
             {% endif %}
-            <a class="c-btn c-btn--sm" href="/comments/export?session_id={{ detail.id }}&amp;segment_id={{ segment.id }}&amp;format=srt" download aria-label="セグメント {{ segment.number }} のコメントをダウンロード">{{ ui.icon("download", "sm") }}コメント</a>
-            {% if segment.speech_ready %}
-            <a class="c-btn c-btn--sm" href="/recordings/segments/{{ segment.id }}/speech" download aria-label="セグメント {{ segment.number }} の音声字幕をダウンロード">{{ ui.icon("download", "sm") }}音声字幕</a>
-            {% endif %}
+            </div>
           </td>
         </tr>
         {% endfor %}
