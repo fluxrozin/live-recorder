@@ -190,16 +190,19 @@ def iso(value: datetime | None) -> str:
     return ensure_aware(value).isoformat()
 
 
-def short_time(value: datetime | None, tz_name: str, now: datetime | None = None) -> str:
-    """同年は月日と時刻、それ以外は年月日を表示する。"""
+def short_time(
+    value: datetime | None, tz_name: str, now: datetime | None = None, *, seconds: bool = False
+) -> str:
+    """同年は月日と時刻、それ以外は年月日を表示する。seconds のときは秒まで出す。"""
     if value is None:
         return "—"
     zone = _zone(tz_name)
     local = ensure_aware(value).astimezone(zone)
     current = ensure_aware(now or utcnow()).astimezone(zone)
+    clock = "%H:%M:%S" if seconds else "%H:%M"
     if local.year == current.year:
-        return local.strftime("%m/%d %H:%M")
-    return local.strftime("%Y/%m/%d %H:%M")
+        return local.strftime(f"%m/%d {clock}")
+    return local.strftime(f"%Y/%m/%d {clock}")
 
 
 def clock(value: datetime | None, tz_name: str) -> str:

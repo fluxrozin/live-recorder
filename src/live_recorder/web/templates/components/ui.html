@@ -23,9 +23,9 @@
 </span>
 {%- endmacro %}
 
-{% macro time(value, tz) -%}
+{% macro time(value, tz, seconds=False) -%}
 {%- if value -%}
-<time datetime="{{ value|iso }}" title="{{ value|localtime(tz) }}" class="u-num">{{ value|shorttime(tz) }}</time>
+<time datetime="{{ value|iso }}" title="{{ value|localtime(tz) }}" class="u-num">{{ value|shorttime(tz, seconds=seconds) }}</time>
 {%- else -%}
 <span class="u-subtle">—</span>
 {%- endif -%}

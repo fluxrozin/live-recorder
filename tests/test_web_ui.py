@@ -345,6 +345,11 @@ def test_recording_pagination_keeps_filters():
 def test_segment_download_only_when_file_exists():
     html = render_page("recording_detail.html", "normal")
     assert "最終確認" in html
+    for label in ("配信開始", "検知", "最終確認", "終了検知", "最終受信"):
+        assert re.search(
+            rf"<dt>{label}</dt><dd><time [^>]*>\d{{2}}/\d{{2}} \d{{2}}:\d{{2}}:\d{{2}}</time></dd>",
+            html,
+        )
     assert html.count("c-status--badge") == 3
     assert 'href="/recordings/segments/1/download"' in html
     assert "/segments/2/download" not in html
@@ -641,8 +646,10 @@ def test_short_time_includes_the_date_on_the_same_day():
     earlier = datetime(2026, 1, 2, 0, 5, tzinfo=timezone.utc)
     last_year = datetime(2025, 6, 1, 3, 0, tzinfo=timezone.utc)
     assert ui.short_time(today, "Asia/Tokyo", now) == "11/10 12:15"
+    assert ui.short_time(today, "Asia/Tokyo", now, seconds=True) == "11/10 12:15:09"
     assert ui.short_time(earlier, "Asia/Tokyo", now) == "01/02 09:05"
     assert ui.short_time(last_year, "Asia/Tokyo", now) == "2025/06/01 12:00"
+    assert ui.short_time(last_year, "Asia/Tokyo", now, seconds=True) == "2025/06/01 12:00:00"
 
 
 def test_status_info_handles_unknown_codes():
