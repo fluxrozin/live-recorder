@@ -54,7 +54,11 @@ from live_recorder.platforms.normalize import (
     tiktok_profile_url,
     twitcasting_profile_url,
 )
-from live_recorder.recording.cleanup import flush_pending_deletions
+from live_recorder.recording.cleanup import (
+    flush_pending_deletions,
+    queue_file_deletion,
+    queue_segment_deletion,
+)
 from live_recorder.recording.files import PathEscape, resolve_stored
 from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.process import command_output
@@ -935,6 +939,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if await repo.deletion_blocked(session_id):
                 flash(request, "録画またはコメント収集が終わってから削除してください", "warning")
                 return RedirectResponse(f"/recordings/{session_id}", status_code=303)
+            await repo.lock_recording_paths()
             for segment in await repo.segments_for_session(session_id):
                 if segment.file_removed:
                     continue
@@ -942,8 +947,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     resolve_stored(root, segment.file_path)
                 except PathEscape:
                     continue
-                await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
-                segment.file_removed = True
+                repo.mark_segment_removed(segment)
+                await queue_segment_deletion(repo, root, segment)
             await repo.add_event("file_deleted", "録画ファイルを削除しました", session_id=session_id)
             await session.commit()
         await flush_pending_deletions(request.app.state.db, root)
@@ -970,16 +975,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             item = await repo.get_session(session_id)
             if item is None:
                 raise HTTPException(404)
+            await repo.lock_recording_paths()
             for segment in await repo.segments_for_session(session_id):
                 try:
                     resolve_stored(root, segment.file_path)
                 except PathEscape:
                     continue
                 if delete_files_too:
-                    await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
+                    repo.mark_segment_removed(segment)
+                    await queue_segment_deletion(repo, root, segment)
                 else:
                     for relative in comment_sidecar_relatives(segment.file_path):
-                        await repo.enqueue_file_deletion(relative, kind="file")
+                        await queue_file_deletion(repo, root, relative)
             comment_job = await repo.latest_comment_job(session_id)
             if comment_job and comment_job.export_path:
                 try:
@@ -987,7 +994,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except PathEscape:
                     pass
                 else:
-                    await repo.enqueue_file_deletion(comment_job.export_path, kind="file")
+                    await queue_file_deletion(repo, root, comment_job.export_path)
             await repo.delete_session(session_id)
             await session.commit()
         await flush_pending_deletions(request.app.state.db, root)

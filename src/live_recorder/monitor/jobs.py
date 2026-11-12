@@ -83,9 +83,10 @@ def comment_job_result(
     has_gaps: bool,
     writer_failed: bool,
     dropped: int = 0,
+    integrity_missed: bool = False,
 ) -> tuple[CommentJobStatus, str | None]:
     """収集の終わり方から終端状態を決める。書き込み失敗や取りこぼしは成功扱いにしない。"""
-    missed = has_gaps or dropped > 0
+    missed = has_gaps or dropped > 0 or integrity_missed
     if writer_failed and outcome in {"stopped", "ended", "offline"}:
         outcome = "comment_writer_failed"
     if outcome == "access_denied":
@@ -137,6 +138,7 @@ class CommentSink:
         self.dropped = 0
         self.reconnects = 0
         self.writer_failed = False
+        self.integrity_missed = False
 
     async def add(self, draft: CommentDraft) -> None:
         try:
@@ -330,6 +332,8 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     from zoneinfo import ZoneInfo
 
                     local = now.astimezone(ZoneInfo(timezone_name))
+                    await repo.lock_recording_paths()
+                    reserved_paths = await repo.reserved_recording_paths()
                     path = build_segment_path(
                         root=settings.recordings_dir,
                         platform=platform,
@@ -338,6 +342,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                         day=local.strftime("%Y-%m-%d"),
                         title=title,
                         segment_number=number,
+                        reserved_paths=reserved_paths,
                     )
                     relative = relative_to_root(settings.recordings_dir, path)
                     segment = await repo.add_segment(job_id, number, relative, now)
@@ -662,10 +667,11 @@ async def _collect_tiktok(
     room_open = False
     attempt = 0
     held: list[CommentDraft] = []
+    retry_unverified = False
 
     @client.on(ConnectEvent)
     async def on_connect(event: object) -> None:
-        nonlocal room_open
+        nonlocal room_open, retry_unverified
         started = attempt
         room_id = getattr(event, "room_id", None)
         info = getattr(client, "room_info", None)
@@ -691,6 +697,7 @@ async def _collect_tiktok(
                 stop.set()
                 return
             sink.reconnects += 1
+            retry_unverified = True
             disconnect = True
         if disconnect:
             if on_unverified is not None:
@@ -698,6 +705,9 @@ async def _collect_tiktok(
                     await on_unverified("room_check_failed")
                 except Exception:
                     log.exception("tiktok room check gap failed for %s", user_id)
+                    sink.integrity_missed = True
+            else:
+                sink.integrity_missed = True
             try:
                 await client.disconnect()
             except Exception:
@@ -712,6 +722,8 @@ async def _collect_tiktok(
             if not room_open:
                 if len(held) < 500:
                     held.append(draft)
+                else:
+                    sink.dropped += 1
                 return
         await sink.add(draft)
 
@@ -736,6 +748,7 @@ async def _collect_tiktok(
             attempt += 1
             room_open = False
             held.clear()
+            retry_unverified = False
         connect_task = asyncio.create_task(client.connect(fetch_room_info=True))
         stop_task = asyncio.create_task(stop.wait())
         await asyncio.wait({connect_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -752,6 +765,14 @@ async def _collect_tiktok(
             return "stopped"
         stop_task.cancel()
         error = connect_task.exception() if connect_task.done() else None
+        if retry_unverified:
+            if sink.reconnects > sink.max_reconnects:
+                return "room_check_failed"
+            try:
+                await asyncio.wait_for(stop.wait(), backoff_seconds(sink.reconnects))
+            except TimeoutError:
+                pass
+            continue
         if error is None:
             return "ended"
         name = type(error).__name__
@@ -918,6 +939,7 @@ async def run_comment_job(
             has_gaps=bool(gaps),
             writer_failed=writer_failed or sink.writer_failed,
             dropped=job.error_count,
+            integrity_missed=sink.integrity_missed,
         )
         if error:
             job.last_error = error
@@ -1107,14 +1129,23 @@ async def _stamp_last_recording(db: Database, session_id: int) -> None:
         await session.commit()
 
 
-async def _stage_retitle(path: Path, title: str | None, sink: list[StagedRetitle]) -> StagedRetitle | None:
+async def _stage_retitle(
+    path: Path,
+    title: str | None,
+    sink: list[StagedRetitle],
+    *,
+    reserved_paths: set[Path] | None = None,
+) -> StagedRetitle | None:
     """付け直しを別スレッドで行う。キャンセルされても作成物を sink に残す。"""
     box: list[StagedRetitle | None] = [None]
     finished = threading.Event()
 
     def run() -> StagedRetitle | None:
         try:
-            staged = stage_retitle(path, title)
+            if reserved_paths is None:
+                staged = stage_retitle(path, title)
+            else:
+                staged = stage_retitle(path, title, reserved_paths=reserved_paths)
             box[0] = staged
             if staged is not None:
                 sink.append(staged)
@@ -1152,6 +1183,8 @@ async def _retitle_finished_segments(
     呼び出し側は配信行をロックしておく。セグメント行もロックするので、コミットまで
     文字起こしが古いパスを取得することはない。作った名前はすぐ sink に載せる。
     """
+    await repo.lock_recording_paths()
+    reserved_paths = {root / relative for relative in await repo.reserved_recording_paths()}
     for segment in await repo.lock_segments_for_job(job_id):
         if segment.file_removed or segment.speech_status == "running" or segment.finished_at is None:
             continue
@@ -1159,9 +1192,10 @@ async def _retitle_finished_segments(
             path = resolve_stored(root, segment.file_path)
         except ValueError:
             continue
-        staged = await _stage_retitle(path, title, sink)
+        staged = await _stage_retitle(path, title, sink, reserved_paths=reserved_paths)
         if staged is None:
             continue
+        reserved_paths.add(staged.dest)
         segment.file_path = rewrite_stored_path(staged, segment.file_path) or segment.file_path
         segment.speech_srt_path = rewrite_stored_path(staged, segment.speech_srt_path)
         await _point_exports_at(repo, session_id, staged)
@@ -1189,6 +1223,7 @@ async def close_recording_if_idle(
             stream = await repo.lock_session(job.stream_session_id)
             if stream is None:
                 return
+            await repo.lock_recording_paths()
             speech_enabled = (await load_runtime(session)).speech_subtitles_enabled
             title = stream.title
             for segment in await repo.lock_segments_for_job(job_id):

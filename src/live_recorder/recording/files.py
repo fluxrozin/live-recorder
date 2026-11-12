@@ -78,6 +78,7 @@ def build_segment_path(
     title: str | None,
     segment_number: int,
     suffix: str = ".ts",
+    reserved_paths: set[str] | None = None,
 ) -> Path:
     directory = root / safe_token(platform) / safe_token(user_id) / safe_token(day, fallback="day")
     directory.mkdir(parents=True, exist_ok=True)
@@ -93,7 +94,7 @@ def build_segment_path(
     stem = f"{prefix}{label}_{segment}"
     candidate = directory / f"{stem}{suffix}"
     counter = 2
-    while _stem_taken(candidate):
+    while _stem_taken(candidate) or _stem_reserved(root, candidate, reserved_paths or set()):
         candidate = directory / f"{stem}_{counter}{suffix}"
         counter += 1
         if counter > 1000 or not _within_name_limit(candidate):
@@ -101,12 +102,27 @@ def build_segment_path(
     return assert_under(root, candidate)
 
 
+def _stem_reserved(root: Path, candidate: Path, reserved_paths: set[str]) -> bool:
+    """DB の履歴・削除待ちと同じ幹を使わない。公開形式は重複時の _2 のまま。"""
+    try:
+        relative = candidate.resolve().relative_to(root.resolve())
+    except ValueError:
+        return True
+    stem = relative.with_suffix("").as_posix()
+    return any(Path(path).with_suffix("").as_posix() == stem for path in reserved_paths)
+
+
 _UNTITLED_FILE = re.compile(
     r"^(?P<head>.+_\d{8}_\d{6}_)無題_seg(?P<num>\d+)(?:_\d+)?(?P<suffix>\.[A-Za-z0-9]+)$"
 )
 
 
-def untitled_replacement(path: Path, title: str | None) -> Path | None:
+def untitled_replacement(
+    path: Path,
+    title: str | None,
+    *,
+    reserved_paths: set[Path] | None = None,
+) -> Path | None:
     """無題で確定したファイル名を、配信タイトルの名前に組み直す。対象外なら None。"""
     if not title or not title.strip():
         return None
@@ -126,7 +142,12 @@ def untitled_replacement(path: Path, title: str | None) -> Path | None:
     stem = f"{head}{label}_{segment}"
     candidate = path.with_name(f"{stem}{suffix}")
     counter = 2
-    while candidate != path and _stem_taken(candidate):
+    reserved_stems = {
+        item.resolve().with_suffix("") for item in (reserved_paths or set())
+    }
+    while candidate != path and (
+        _stem_taken(candidate) or candidate.resolve().with_suffix("") in reserved_stems
+    ):
         candidate = path.with_name(f"{stem}_{counter}{suffix}")
         if len(candidate.name.encode("utf-8")) > 255 or counter > 1000:
             return None

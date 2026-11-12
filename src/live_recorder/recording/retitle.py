@@ -28,12 +28,17 @@ class StagedRetitle:
     links: list[tuple[Path, Path, str]] = field(default_factory=list)
 
 
-def stage_retitle(path: Path, title: str | None) -> StagedRetitle | None:
+def stage_retitle(
+    path: Path,
+    title: str | None,
+    *,
+    reserved_paths: set[Path] | None = None,
+) -> StagedRetitle | None:
     """新しい名前を作る。移さないとき、または対象外のときは None。"""
     if not path.is_file():
         return None
     try:
-        dest = untitled_replacement(path, title)
+        dest = untitled_replacement(path, title, reserved_paths=reserved_paths)
     except OSError:
         log.exception("retitle name failed for %s", path)
         return None

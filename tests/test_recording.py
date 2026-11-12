@@ -87,6 +87,20 @@ def test_filename_uses_platform_user_time_and_title(tmp_path: Path):
     )
     assert again.name == occupied.name.removesuffix(".ts") + "_2.ts"
     assert occupied.with_suffix(".mp4").read_bytes() == b"old"
+    reserved = build_segment_path(
+        root=tmp_path,
+        platform="tiktok",
+        user_id="reserved",
+        when_stamp="20261109_210000",
+        day="2026-11-09",
+        title="削除待ち",
+        segment_number=1,
+        reserved_paths={
+            "tiktok/reserved/2026-11-09/"
+            "tiktok_@reserved_20261109_210000_削除待ち_seg01.mp4"
+        },
+    )
+    assert reserved.name == "tiktok_@reserved_20261109_210000_削除待ち_seg01_2.ts"
 
 
 def test_closed_untitled_recording_takes_the_session_title(tmp_path: Path):
@@ -821,6 +835,8 @@ class _TikTokSink:
         self.items: list[str] = []
         self.reconnects = 0
         self.max_reconnects = 5
+        self.dropped = 0
+        self.integrity_missed = False
 
     async def add(self, draft):
         self.items.append(draft.message)
@@ -917,9 +933,89 @@ async def test_tiktok_room_check_failure_keeps_unverified_comments_out(monkeypat
         _collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks(), on_unverified),
         2,
     )
-    assert outcome != "ended"
+    assert outcome == "room_check_failed"
     assert sink.items == []
     assert gaps == ["room_check_failed"]
+
+
+async def test_tiktok_room_check_failure_retries_until_match(monkeypatch):
+    import asyncio
+
+    from live_recorder.monitor.jobs import _collect_tiktok
+
+    _fake_tiktok(monkeypatch, ["r1", "r1"])
+    stop = asyncio.Event()
+    sink = _TikTokSink()
+    checks = 0
+
+    async def on_room(_room_id, _info):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise RuntimeError("db down")
+        stop.set()
+        return True
+
+    gaps: list[str] = []
+
+    async def on_unverified(reason: str) -> None:
+        gaps.append(reason)
+
+    outcome = await asyncio.wait_for(
+        _collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks(), on_unverified),
+        2,
+    )
+    assert outcome == "stopped"
+    assert checks == 2
+    assert gaps == ["room_check_failed"]
+    assert "r1-early" in sink.items
+
+
+async def test_tiktok_held_overflow_counts_as_dropped(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from TikTokLive.events import CommentEvent, ConnectEvent
+
+    from live_recorder.monitor.jobs import _collect_tiktok
+
+    class Client:
+        def __init__(self, unique_id):
+            self.handlers = {}
+            self.room_info = None
+
+        def on(self, event_type):
+            def register(handler):
+                self.handlers[event_type] = handler
+                return handler
+
+            return register
+
+        async def connect(self, fetch_room_info=True):
+            checking = asyncio.create_task(self.handlers[ConnectEvent](SimpleNamespace(room_id="r1")))
+            await asyncio.sleep(0)
+            for index in range(550):
+                await self.handlers[CommentEvent](
+                    SimpleNamespace(content=f"c{index}", user=None, common=None)
+                )
+            await checking
+            stop.set()
+            raise ConnectionError("dropped")
+
+        async def disconnect(self):
+            return None
+
+    monkeypatch.setattr("TikTokLive.TikTokLiveClient", Client)
+    stop = asyncio.Event()
+    sink = _TikTokSink()
+
+    async def on_room(_room_id, _info):
+        await asyncio.sleep(0.05)
+        return True
+
+    await asyncio.wait_for(_collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks()), 2)
+    assert len(sink.items) == 500
+    assert sink.dropped == 50
 
 
 async def test_collect_twitcasting_backfills_without_a_tight_loop():

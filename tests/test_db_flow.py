@@ -623,7 +623,7 @@ async def test_comment_retention_and_history_delete_do_not_deadlock(tmp_path, mo
 
 
 async def test_pending_file_deletion_retries_after_unlink_failure(tmp_path, monkeypatch):
-    from live_recorder.recording.cleanup import flush_pending_deletions
+    from live_recorder.recording.cleanup import flush_pending_deletions, queue_segment_deletion
 
     db, _session_id, _job_id, segment_id = await _recording(tmp_path, monkeypatch)
     settings = _settings(tmp_path)
@@ -632,8 +632,8 @@ async def test_pending_file_deletion_retries_after_unlink_failure(tmp_path, monk
     async with db.session() as session:
         repo = Repository(session)
         segment = await repo.get_segment(segment_id)
-        await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
-        segment.file_removed = True
+        repo.mark_segment_removed(segment)
+        await queue_segment_deletion(repo, settings.recordings_dir, segment)
         await session.commit()
     parent.chmod(0o555)
     try:
@@ -649,6 +649,116 @@ async def test_pending_file_deletion_retries_after_unlink_failure(tmp_path, monk
         assert await Repository(session).pending_file_deletions() == []
         segment = await Repository(session).get_segment(segment_id)
         assert segment.file_removed is True
+        assert segment.file_purge_done is True
+    await db.dispose()
+
+
+async def test_pending_deletion_does_not_remove_reused_live_path(tmp_path, monkeypatch):
+    from live_recorder.recording.cleanup import flush_pending_deletions, queue_segment_deletion
+
+    db, _session_id, job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    settings = _settings(tmp_path)
+    video = tmp_path / "rec" / _UNTITLED
+    async with db.session() as session:
+        repo = Repository(session)
+        segment = await repo.get_segment(segment_id)
+        repo.mark_segment_removed(segment)
+        await queue_segment_deletion(repo, settings.recordings_dir, segment)
+        await session.commit()
+    # キューが世代を記録したあと、同名パスが新しい録画へ差し替わる。
+    video.unlink()
+    video.write_bytes(b"new-capture")
+    async with db.session() as session:
+        repo = Repository(session)
+        session.add(
+            RecordingSegment(
+                recording_job_id=job_id,
+                segment_number=2,
+                started_at=datetime(2026, 11, 12, 2, tzinfo=timezone.utc),
+                finished_at=datetime(2026, 11, 12, 3, tzinfo=timezone.utc),
+                file_path=_UNTITLED,
+                file_size=11,
+                duration_ms=1000,
+                validation_status="ok",
+            )
+        )
+        await session.commit()
+    assert await flush_pending_deletions(db, settings.recordings_dir) == 1
+    assert video.read_bytes() == b"new-capture"
+    async with db.session() as session:
+        repo = Repository(session)
+        assert await repo.pending_file_deletions() == []
+        old = await repo.get_segment(segment_id)
+        assert old.file_purge_done is True
+    await db.dispose()
+
+
+async def test_partial_comment_retention_replaces_stale_delete_and_retries_ass(tmp_path, monkeypatch):
+    from live_recorder.comments.segments import comment_export_name
+    from live_recorder.db.models import Comment
+    from live_recorder.recording.cleanup import (
+        flush_pending_ass_refreshes,
+        flush_pending_deletions,
+    )
+
+    db, session_id, _job_id, _segment_id = await _recording(tmp_path, monkeypatch)
+    settings = _settings(tmp_path)
+    video = settings.recordings_dir / _UNTITLED
+    comment_file = video.with_name(comment_export_name(video.name))
+    ass_file = video.with_suffix(".ass")
+    comment_file.write_text("期限切れ\n", encoding="utf-8")
+    ass_file.write_text("期限切れ\n", encoding="utf-8")
+    async with db.session() as session:
+        repo = Repository(session)
+        job = await repo.latest_comment_job(session_id)
+        assert job is not None
+        job.export_path = comment_file.relative_to(settings.recordings_dir).as_posix()
+        session.add(
+            Comment(
+                stream_session_id=session_id,
+                platform_comment_id="retained",
+                platform_user_id="viewer",
+                nickname="視聴者",
+                message="保持対象",
+                received_at=datetime(2026, 11, 12, 0, 0, 0, 500000, tzinfo=timezone.utc),
+                dedupe_key="retained",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr("live_recorder.monitor.supervisor.unlink_stored", lambda *_args: False)
+
+    def fail_ass(*_args, **_kwargs):
+        raise OSError("directory is read-only")
+
+    monkeypatch.setattr("live_recorder.monitor.supervisor.refresh_combined_ass", fail_ass)
+    monkeypatch.setattr("live_recorder.monitor.jobs.refresh_combined_ass", fail_ass)
+    supervisor = Supervisor(
+        settings,
+        db,
+        TwitCastingClient(client_id="", client_secret="", access_token=""),
+    )
+    async with db.session() as session:
+        repo = Repository(session)
+        await supervisor._refresh_comment_retention(repo, session_id, "Asia/Tokyo")
+        await session.commit()
+
+    assert "保持対象" in comment_file.read_text(encoding="utf-8")
+    async with db.session() as session:
+        pending = await Repository(session).pending_file_deletions()
+        assert [(item.file_path, item.kind) for item in pending] == [(_UNTITLED, "refresh_ass")]
+    # 古い SRT 削除要求は再生成時に取り消されている。
+    assert await flush_pending_deletions(db, settings.recordings_dir) == 0
+    assert comment_file.is_file()
+
+    def write_ass(video_path, **_kwargs):
+        video_path.with_suffix(".ass").write_text("保持対象\n", encoding="utf-8")
+
+    monkeypatch.setattr("live_recorder.recording.cleanup.refresh_combined_ass", write_ass)
+    assert await flush_pending_ass_refreshes(db, settings) == 1
+    assert ass_file.read_text(encoding="utf-8") == "保持対象\n"
+    async with db.session() as session:
+        assert await Repository(session).pending_file_deletions() == []
     await db.dispose()
 
 

@@ -142,6 +142,7 @@ class RecordingSegment(Base):
     container_format: Mapped[str | None] = mapped_column(String(32))
     validation_status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
     file_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    file_purge_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     speech_status: Mapped[str | None] = mapped_column(String(16))
     speech_srt_path: Mapped[str | None] = mapped_column(String(500))
     speech_error: Mapped[str | None] = mapped_column(Text)
@@ -283,7 +284,7 @@ class WorkerHeartbeat(Base):
 
 
 class PendingFileDeletion(Base):
-    """DB 確定後に消す録画・副ファイル。unlink 失敗後も再試行できる。"""
+    """DB 確定後のファイル操作。削除対象の世代も保持する。"""
 
     __tablename__ = "pending_file_deletions"
     __table_args__ = (UniqueConstraint("file_path", name="uq_pending_file_deletions_path"),)
@@ -292,4 +293,10 @@ class PendingFileDeletion(Base):
     file_path: Mapped[str] = mapped_column(String(500))
     speech_srt_path: Mapped[str | None] = mapped_column(String(500))
     kind: Mapped[str] = mapped_column(String(16), default="video", server_default="video")
+    recording_segment_id: Mapped[int | None] = mapped_column(BigInteger)
+    expected_device: Mapped[int | None] = mapped_column(BigInteger)
+    expected_inode: Mapped[int | None] = mapped_column(BigInteger)
+    expected_size: Mapped[int | None] = mapped_column(BigInteger)
+    expected_mtime_ns: Mapped[int | None] = mapped_column(BigInteger)
+    expected_ctime_ns: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -852,40 +852,131 @@ class Repository:
         return row
 
     async def enqueue_file_deletion(
-        self, file_path: str, speech_srt_path: str | None = None, *, kind: str = "video"
+        self,
+        file_path: str,
+        speech_srt_path: str | None = None,
+        *,
+        kind: str = "file",
+        recording_segment_id: int | None = None,
+        expected_device: int | None = None,
+        expected_inode: int | None = None,
+        expected_size: int | None = None,
+        expected_mtime_ns: int | None = None,
+        expected_ctime_ns: int | None = None,
     ) -> None:
-        """同じパスは1行にまとめる。履歴削除後も再試行できるようにする。"""
+        """同じパスの操作は最新世代へ置き換える。"""
         stmt = pg_insert(PendingFileDeletion).values(
-            file_path=file_path, speech_srt_path=speech_srt_path, kind=kind
+            file_path=file_path,
+            speech_srt_path=speech_srt_path,
+            kind=kind,
+            recording_segment_id=recording_segment_id,
+            expected_device=expected_device,
+            expected_inode=expected_inode,
+            expected_size=expected_size,
+            expected_mtime_ns=expected_mtime_ns,
+            expected_ctime_ns=expected_ctime_ns,
         )
         stmt = stmt.on_conflict_do_update(
             constraint="uq_pending_file_deletions_path",
             set_={
-                "speech_srt_path": func.coalesce(stmt.excluded.speech_srt_path, PendingFileDeletion.speech_srt_path),
+                "speech_srt_path": stmt.excluded.speech_srt_path,
                 "kind": stmt.excluded.kind,
+                "recording_segment_id": stmt.excluded.recording_segment_id,
+                "expected_device": stmt.excluded.expected_device,
+                "expected_inode": stmt.excluded.expected_inode,
+                "expected_size": stmt.excluded.expected_size,
+                "expected_mtime_ns": stmt.excluded.expected_mtime_ns,
+                "expected_ctime_ns": stmt.excluded.expected_ctime_ns,
             },
         )
         await self.session.execute(stmt)
 
-    async def pending_file_deletions(self) -> list[PendingFileDeletion]:
-        result = await self.session.scalars(select(PendingFileDeletion).order_by(PendingFileDeletion.id))
+    async def pending_file_deletions(self, *, kind: str | None = None) -> list[PendingFileDeletion]:
+        stmt = select(PendingFileDeletion)
+        if kind is not None:
+            stmt = stmt.where(PendingFileDeletion.kind == kind)
+        result = await self.session.scalars(stmt.order_by(PendingFileDeletion.id))
         return list(result)
+
+    async def get_pending_file_deletion(self, deletion_id: int) -> PendingFileDeletion | None:
+        return await self.session.get(PendingFileDeletion, deletion_id)
 
     async def clear_pending_file_deletion(self, deletion_id: int) -> None:
         row = await self.session.get(PendingFileDeletion, deletion_id)
         if row is not None:
             await self.session.delete(row)
 
-    async def enqueue_removed_segments(self) -> int:
-        """画面上は削除済みだが実ファイル待ちのセグメントをキューへ戻す。"""
-        segments = await self.session.scalars(
-            select(RecordingSegment).where(RecordingSegment.file_removed.is_(True))
+    async def clear_pending_file_path(self, file_path: str, *, kind: str | None = None) -> None:
+        stmt = delete(PendingFileDeletion).where(PendingFileDeletion.file_path == file_path)
+        if kind is not None:
+            stmt = stmt.where(PendingFileDeletion.kind == kind)
+        await self.session.execute(stmt)
+
+    async def lock_recording_paths(self) -> None:
+        """録画名の予約と削除要求作成を直列化する。"""
+        await self.session.execute(select(func.pg_advisory_xact_lock(0x4C5250415448)))
+
+    async def reserved_recording_paths(self) -> set[str]:
+        paths = {
+            value
+            for value in await self.session.scalars(select(RecordingSegment.file_path))
+            if value
+        }
+        paths.update(
+            value
+            for value in await self.session.scalars(select(PendingFileDeletion.file_path))
+            if value
         )
-        count = 0
+        return paths
+
+    async def segments_needing_purge(self) -> list[RecordingSegment]:
+        result = await self.session.scalars(
+            select(RecordingSegment).where(
+                RecordingSegment.file_removed.is_(True),
+                RecordingSegment.file_purge_done.is_(False),
+            )
+        )
+        return list(result)
+
+    async def path_has_live_segment(self, file_path: str, *, excluding_id: int | None = None) -> bool:
+        stmt = select(RecordingSegment.id).where(
+            RecordingSegment.file_path == file_path,
+            RecordingSegment.file_removed.is_(False),
+        )
+        if excluding_id is not None:
+            stmt = stmt.where(RecordingSegment.id != excluding_id)
+        return await self.session.scalar(stmt.limit(1)) is not None
+
+    async def finish_segment_purge_if_ready(self, segment_id: int) -> None:
+        pending = await self.session.scalar(
+            select(PendingFileDeletion.id)
+            .where(
+                PendingFileDeletion.recording_segment_id == segment_id,
+                PendingFileDeletion.kind == "file",
+            )
+            .limit(1)
+        )
+        if pending is not None:
+            return
+        segment = await self.session.get(RecordingSegment, segment_id)
+        if segment is not None and segment.file_removed:
+            segment.file_purge_done = True
+
+    async def mark_file_purge_done(self, file_path: str) -> None:
+        """旧キューの移行用。パスだけで削除せず、削除済み行を完了へ送る。"""
+        segments = await self.session.scalars(
+            select(RecordingSegment).where(
+                RecordingSegment.file_path == file_path,
+                RecordingSegment.file_removed.is_(True),
+            )
+        )
         for segment in segments:
-            await self.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
-            count += 1
-        return count
+            segment.file_purge_done = True
+
+    def mark_segment_removed(self, segment: RecordingSegment) -> None:
+        """履歴は残してファイル削除を始める。完了フラグは付け直す。"""
+        segment.file_removed = True
+        segment.file_purge_done = False
 
     async def recorded_path_refs(self) -> set[str]:
         """改名の照合用。DB が指している録画・字幕・書き出しパス。"""

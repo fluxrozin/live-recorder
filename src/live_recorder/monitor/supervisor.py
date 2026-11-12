@@ -33,7 +33,16 @@ from live_recorder.monitor.planner import (
 from live_recorder.platforms.tiktok import TikTokChecks
 from live_recorder.platforms.twitcasting import TwitCastingClient
 from live_recorder.platforms.types import LiveObservation
-from live_recorder.recording.cleanup import flush_pending_deletions, queue_removed_segment_files, unlink_stored
+from live_recorder.recording.cleanup import (
+    FileGeneration,
+    flush_pending_ass_refreshes,
+    flush_pending_deletions,
+    queue_ass_refresh,
+    queue_file_deletion,
+    queue_removed_segment_files,
+    queue_segment_deletion,
+    unlink_stored,
+)
 from live_recorder.recording.files import resolve_stored
 from live_recorder.recording.finalize import allow_new_recording, disk_free
 from live_recorder.recording.process import command_output
@@ -158,8 +167,9 @@ class Supervisor:
             for job_id in ended_comments:
                 await self._finish_ended_comments(repo, job_id)
             await session.commit()
-        await queue_removed_segment_files(self.db)
+        await queue_removed_segment_files(self.db, self.settings.recordings_dir)
         await flush_pending_deletions(self.db, self.settings.recordings_dir)
+        await flush_pending_ass_refreshes(self.db, self.settings)
 
     async def _finish_ended_recording(self, repo: Repository, job_id: int) -> None:
         job = await repo.get_recording_job(job_id)
@@ -602,10 +612,11 @@ class Supervisor:
                 cutoff = now - timedelta(days=runtime.retention_days)
                 for session_id in await repo.expired_session_ids(cutoff):
                     await repo.lock_session(session_id)
+                await repo.lock_recording_paths()
                 expired = await repo.expired_segments(cutoff)
                 for segment in expired:
-                    await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
-                    segment.file_removed = True
+                    repo.mark_segment_removed(segment)
+                    await queue_segment_deletion(repo, self.settings.recordings_dir, segment)
                 if expired:
                     await repo.add_event("maintenance", "保存期限を過ぎた録画ファイルを削除しました")
             if runtime.comment_retention_days > 0:
@@ -622,31 +633,57 @@ class Supervisor:
                         f"期限を過ぎたコメント {removed} 件と、その配信のコメント字幕を更新しました",
                     )
             await session.commit()
-        await queue_removed_segment_files(self.db)
+        await queue_removed_segment_files(self.db, self.settings.recordings_dir)
         await flush_pending_deletions(self.db, self.settings.recordings_dir)
+        await flush_pending_ass_refreshes(self.db, self.settings)
 
     async def _refresh_comment_retention(self, repo: Repository, session_id: int, tz_name: str) -> None:
-        videos: list[tuple[Path, Path | None]] = []
+        videos: list[tuple[Path, Path | None, str, str | None]] = []
         root = self.settings.recordings_dir
         for segment in await repo.segments_for_session(session_id):
             if segment.file_removed:
                 continue
             for relative in comment_text_relatives(segment.file_path):
-                unlink_stored(root, relative)
+                try:
+                    path = resolve_stored(root, relative)
+                except ValueError:
+                    continue
+                generation = FileGeneration.from_path(path)
+                if generation is not None and not unlink_stored(root, relative, generation):
+                    await queue_file_deletion(repo, root, relative)
             try:
                 video = resolve_stored(root, segment.file_path)
             except ValueError:
                 continue
-            videos.append((video, stored_speech_srt(root, segment.speech_srt_path)))
+            videos.append(
+                (video, stored_speech_srt(root, segment.speech_srt_path), segment.file_path, segment.speech_srt_path)
+            )
         jobs = await repo.comment_jobs_for_session(session_id)
         for job in jobs:
             if job.export_path:
-                unlink_stored(root, job.export_path)
+                try:
+                    path = resolve_stored(root, job.export_path)
+                except ValueError:
+                    job.export_path = None
+                    continue
+                generation = FileGeneration.from_path(path)
+                if generation is not None and not unlink_stored(root, job.export_path, generation):
+                    await queue_file_deletion(repo, root, job.export_path)
                 job.export_path = None
-        if await repo.comment_count(session_id) and jobs:
+        remaining = await repo.comment_count(session_id)
+        if remaining and jobs:
             await _auto_export(self.settings, repo, session_id, jobs[-1], tz_name)
-        for video, speech in videos:
+            if jobs[-1].export_path:
+                await repo.clear_pending_file_path(jobs[-1].export_path, kind="file")
+        for video, speech, relative, speech_relative in videos:
             if not video.is_file():
+                continue
+            if not remaining:
+                ass_relative = Path(relative).with_suffix(".ass").as_posix()
+                ass_path = resolve_stored(root, ass_relative)
+                generation = FileGeneration.from_path(ass_path)
+                if generation is not None and not unlink_stored(root, ass_relative, generation):
+                    await queue_file_deletion(repo, root, ass_relative)
                 continue
             try:
                 await asyncio.to_thread(
@@ -654,6 +691,9 @@ class Supervisor:
                 )
             except Exception:
                 log.exception("combined ass failed")
+                await queue_ass_refresh(repo, relative, speech_relative)
+            else:
+                await repo.clear_pending_file_path(relative, kind="refresh_ass")
 
     async def _event(self, event_type: str, message: str, *, severity: str) -> None:
         async with self.db.session() as session:
