@@ -37,3 +37,14 @@ def test_settings_build_url_from_parts(tmp_path, monkeypatch):
     assert "p%40ss+word" in settings.database_url or "p%40ss%20word" in settings.database_url
     assert settings.sync_database_url().startswith("postgresql+psycopg://")
     os.environ.get("POSTGRES_PASSWORD")
+
+
+def test_sync_url_keeps_the_query_string():
+    from sqlalchemy.engine import make_url
+
+    from live_recorder.config import _render_url
+
+    rendered = _render_url(make_url("postgresql+psycopg://user:p%40ss@localhost/live?sslmode=require"))
+    assert "p%40ss" in rendered
+    assert "sslmode=require" in rendered
+    assert "immutabledict" not in rendered

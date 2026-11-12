@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -153,9 +154,41 @@ class FinalFile:
     obsolete: Path | None = None
 
 
+_NAME_MAX = 255
+
+
+def _mp4_name(stem: str, counter: int | None) -> str:
+    """255 バイト以内の MP4 名。長い幹は拡張子を残して切る。"""
+    suffix = ".mp4" if counter is None else f"_{counter}.mp4"
+    room = _NAME_MAX - len(suffix.encode("utf-8"))
+    raw = stem.encode("utf-8")
+    if len(raw) > room:
+        stem = raw[:room].decode("utf-8", errors="ignore").rstrip("._") or "segment"
+    return f"{stem}{suffix}"
+
+
 def remux_partial_path(source: Path) -> Path:
-    """既存の MP4 を出力先にしない。検査が通ってから本番名へ移す。"""
-    return source.with_suffix(".mp4.partial")
+    """同じディレクトリの短い一時名。長いタイトルでも 255 バイトを超えない。"""
+    token = uuid.uuid4().hex[:12]
+    return source.with_name(f".remux-{token}.mp4.partial")
+
+
+def _written_after(source: Path, target: Path) -> bool:
+    """target が source より新しいとき、このセグメントの詰め直し結果とみなす。"""
+    try:
+        return target.stat().st_size > 0 and target.stat().st_mtime >= source.stat().st_mtime
+    except OSError:
+        return False
+
+
+def _free_mp4(source: Path) -> Path:
+    counter = 2
+    while counter < 1000:
+        candidate = source.with_name(_mp4_name(source.stem, counter))
+        if not candidate.exists():
+            return candidate
+        counter += 1
+    raise OSError(f"空きの MP4 名がありません: {source.name}")
 
 
 def discard_obsolete(path: Path | None) -> None:
@@ -170,16 +203,17 @@ async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFi
         return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, False)
     if source.suffix.lower() == ".mp4" and probed.ok:
         return FinalFile(source, probed.container or "mp4", probed.duration_ms, probed.size, "ok", True)
-    target = source.with_suffix(".mp4")
-    if target.is_file() and target.stat().st_size == 0:
-        target.unlink()
-    if target.is_file():
-        checked = await probe_file(ffprobe, target)
+    preferred = source.with_name(_mp4_name(source.stem, None))
+    if preferred.is_file() and preferred.stat().st_size == 0 and preferred.resolve() != source.resolve():
+        preferred.unlink()
+    # 落ちた直後の詰め直しだけを採用する。古い同名 MP4 は別の録画なので残す。
+    if preferred.is_file() and preferred.resolve() != source.resolve() and _written_after(source, preferred):
+        checked = await probe_file(ffprobe, preferred)
         if checked.ok:
-            obsolete = None if target.resolve() == source.resolve() else source
             return FinalFile(
-                target, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, obsolete
+                preferred, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, source
             )
+    target = preferred if not preferred.exists() else _free_mp4(source)
     partial = remux_partial_path(source)
     partial.unlink(missing_ok=True)
     remuxed = await remux_to_mp4(ffmpeg, source, partial, probed.video_codec)

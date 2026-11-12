@@ -135,6 +135,10 @@ async def _run(stop: asyncio.Event) -> None:
                 )
             except Exception as exc:
                 status, produced, error = "failed", None, clip_error(exc)
+            if produced is not None and not await _segment_still_recorded(db, segment_id):
+                produced.unlink(missing_ok=True)
+                status, produced, error = "failed", None, "録画は削除されました"
+                previous_srt = None
             produced_relative = None
             if produced is not None:
                 produced_relative = relative_to_root(settings.recordings_dir, produced)
@@ -156,6 +160,12 @@ async def _run(stop: asyncio.Event) -> None:
         await connection.commit()
         await connection.close()
         await db.dispose()
+
+
+async def _segment_still_recorded(db: Database, segment_id: int) -> bool:
+    async with db.session() as session:
+        segment = await Repository(session).get_segment(segment_id)
+        return segment is not None and not segment.file_removed and segment.finished_at is not None
 
 
 def main() -> None:

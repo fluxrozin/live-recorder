@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from live_recorder.comments.dedupe import dedupe_key
+from live_recorder.comments.segments import ordered_export_segments, segment_comment_bounds
 from live_recorder.db.models import (
     CollectionGap,
     Comment,
@@ -136,6 +137,21 @@ class Repository:
             .where(StreamSession.id == session_id)
         )
 
+    async def lock_session(self, session_id: int) -> StreamSession | None:
+        """削除とジョブ作成がすれ違わないよう、配信行をロックする。"""
+        return await self.session.scalar(
+            select(StreamSession).where(StreamSession.id == session_id).with_for_update()
+        )
+
+    async def deletion_blocked(self, session_id: int) -> bool:
+        """録画中かコメント収集中なら True。行ロックは呼び出し側のトランザクションが終わるまで持つ。"""
+        stream = await self.lock_session(session_id)
+        if stream is None:
+            return False
+        if await self.active_recording(session_id) is not None:
+            return True
+        return await self.active_comments(session_id) is not None
+
     async def active_recording(self, session_id: int) -> RecordingJob | None:
         return await self.session.scalar(
             select(RecordingJob)
@@ -233,6 +249,7 @@ class Repository:
             .where(
                 RecordingSegment.speech_status == "pending",
                 RecordingSegment.file_removed.is_(False),
+                RecordingSegment.finished_at.is_not(None),
             )
             .order_by(RecordingSegment.id)
             .limit(1)
@@ -332,7 +349,6 @@ class Repository:
             .join(StreamSession)
             .where(
                 RecordingSegment.file_removed.is_(False),
-                RecordingSegment.speech_status == "completed",
                 RecordingSegment.speech_srt_path.is_not(None),
             )
             .options(
@@ -727,6 +743,75 @@ class Repository:
                 break
         return found
 
+    async def export_comments_between(
+        self,
+        session_id: int,
+        *,
+        start: datetime | None,
+        end_inclusive: datetime | None,
+        end_exclusive: datetime | None,
+        text: str | None = None,
+        user_id: str | None = None,
+        nickname: str | None = None,
+        received_start: datetime | None = None,
+        received_end: datetime | None = None,
+        limit: int = 100_000,
+    ) -> list[Comment]:
+        """セグメントの時間幅の中だけを上限まで取る。全体を先に切らない。"""
+        anchor = func.coalesce(Comment.posted_at, Comment.received_at)
+        stmt = select(Comment).where(Comment.stream_session_id == session_id)
+        if start is not None:
+            stmt = stmt.where(anchor >= start)
+        if end_inclusive is not None:
+            stmt = stmt.where(anchor <= end_inclusive)
+        if end_exclusive is not None:
+            stmt = stmt.where(anchor < end_exclusive)
+        if received_start is not None:
+            stmt = stmt.where(Comment.received_at >= received_start)
+        if received_end is not None:
+            stmt = stmt.where(Comment.received_at <= received_end)
+        if text:
+            stmt = stmt.where(Comment.message.ilike(self._like(text)))
+        if user_id:
+            stmt = stmt.where(Comment.platform_user_id == user_id)
+        if nickname:
+            stmt = stmt.where(Comment.nickname.ilike(self._like(nickname)))
+        stmt = stmt.order_by(anchor.asc(), Comment.id.asc()).limit(limit)
+        return list(await self.session.scalars(stmt))
+
+    async def export_comments_for_segments(
+        self,
+        session_id: int,
+        windows,
+        *,
+        only_id: int | None = None,
+        text: str | None = None,
+        user_id: str | None = None,
+        nickname: str | None = None,
+        received_start: datetime | None = None,
+        received_end: datetime | None = None,
+    ) -> list[Comment]:
+        ordered = ordered_export_segments(windows)
+        found: list[Comment] = []
+        for index, window in enumerate(ordered):
+            if only_id is not None and window.id != only_id:
+                continue
+            start, end_inclusive, end_exclusive = segment_comment_bounds(ordered, index)
+            found.extend(
+                await self.export_comments_between(
+                    session_id,
+                    start=start,
+                    end_inclusive=end_inclusive,
+                    end_exclusive=end_exclusive,
+                    text=text,
+                    user_id=user_id,
+                    nickname=nickname,
+                    received_start=received_start,
+                    received_end=received_end,
+                )
+            )
+        return found
+
     async def delete_session(self, session_id: int) -> StreamSession | None:
         row = await self.session.get(StreamSession, session_id)
         if row is None:
@@ -853,7 +938,7 @@ class Repository:
                 RecordingSegment.file_removed.is_(False),
                 RecordingSegment.file_size.is_not(None),
                 RecordingSegment.file_size > 0,
-                or_(RecordingSegment.validation_status == "ok", RecordingSegment.validation_status == "partial"),
+                RecordingSegment.validation_status == "ok",
             )
         )
         return bool(count)

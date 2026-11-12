@@ -22,6 +22,8 @@ def requeue_speech(segment) -> str:
     """再生成を待ち行列へ戻す。処理中と、すでに待ちのものは変えない。既存の SRT は残す。"""
     if segment.file_removed:
         return "removed"
+    if getattr(segment, "finished_at", True) is None:
+        return "unfinished"
     if segment.speech_status == "running":
         return "running"
     if segment.speech_status == "pending":

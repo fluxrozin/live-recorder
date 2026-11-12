@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+import uuid
 from pathlib import Path
 
+from live_recorder.recording.files import fit_export_name
 from live_recorder.speech.quality import SpeechCue
 
 SPEECH_EXPORT_SUFFIX = "_Speech.srt"
-_MAX_NAME_BYTES = 255
 
 
 def speech_export_name(video_name: str) -> str:
@@ -15,13 +16,7 @@ def speech_export_name(video_name: str) -> str:
     stem = Path(stem).stem.replace('"', "").replace("\r", "").replace("\n", "").strip()
     if not stem or stem in {".", ".."} or "/" in stem or "\\" in stem:
         stem = "speech"
-    room = _MAX_NAME_BYTES - len(SPEECH_EXPORT_SUFFIX.encode("utf-8"))
-    encoded = stem.encode("utf-8")
-    if len(encoded) > room:
-        stem = encoded[:room].decode("utf-8", errors="ignore").rstrip("._")
-    if not stem or stem in {".", ".."}:
-        stem = "speech"
-    return f"{stem}{SPEECH_EXPORT_SUFFIX}"
+    return fit_export_name(stem, SPEECH_EXPORT_SUFFIX, fallback="speech")
 
 
 def speech_srt_path(video: Path) -> Path:
@@ -103,7 +98,7 @@ def write_speech_srt(cues: list[SpeechCue], output_path: Path) -> int:
     if not lines:
         output_path.unlink(missing_ok=True)
         return 0
-    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
+    temporary_path = output_path.with_name(f".srt-{uuid.uuid4().hex[:12]}.tmp")
     try:
         temporary_path.write_text("\n".join(lines), encoding="utf-8")
         temporary_path.replace(output_path)

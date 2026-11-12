@@ -8,7 +8,9 @@ from live_recorder.comments.segments import (
     assign_segment,
     comment_export_name,
     comment_sidecar_relatives,
+    ordered_export_segments,
     partition_by_segment,
+    segment_comment_bounds,
     segment_offset_ms,
 )
 from live_recorder.timeutil import parse_platform_time
@@ -167,6 +169,13 @@ def test_comment_export_uses_recording_stem():
     long_name = comment_export_name(("あ" * 200) + ".ts")
     assert long_name.endswith("_Comments.srt")
     assert len(long_name.encode("utf-8")) <= 255
+    prefix = "tiktok_@user_20261110_010756_" + ("あ" * 80)
+    first = comment_export_name(prefix + "_seg01.ts")
+    second = comment_export_name(prefix + "_seg02.ts")
+    assert first.endswith("_seg01_Comments.srt")
+    assert second.endswith("_seg02_Comments.srt")
+    assert first != second
+    assert len(first.encode("utf-8")) <= 255
     relatives = comment_sidecar_relatives("tiktok/user/day/clip.ts")
     assert relatives[0] == "tiktok/user/day/clip_Comments.srt"
     assert relatives[1:] == [
@@ -218,3 +227,13 @@ def test_comment_retention_does_not_list_speech_or_video():
     assert "tiktok/user/day/clip_Speech.srt" not in relatives
     assert "tiktok/user/day/clip.ass" not in relatives
     assert "tiktok/user/day/clip_Comments.srt" in relatives
+
+
+def test_comment_bounds_follow_each_segment():
+    start = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+    second_start = datetime(2026, 11, 11, 12, 30, tzinfo=timezone.utc)
+    first = ExportSegment(1, 1, "seg01.mp4", start, datetime(2026, 11, 11, 12, 10, tzinfo=timezone.utc))
+    second = ExportSegment(2, 2, "seg02.mp4", second_start, None)
+    ordered = ordered_export_segments([second, first])
+    assert segment_comment_bounds(ordered, 0) == (None, first.ended_at, second_start)
+    assert segment_comment_bounds(ordered, 1) == (second_start, None, None)

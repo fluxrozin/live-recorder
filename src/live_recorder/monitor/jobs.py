@@ -33,6 +33,7 @@ from live_recorder.platforms.twitcasting import (
     TWITCASTING_REFERER,
     TWITCASTING_USER_AGENT,
     TwitCastingClient,
+    fetch_comments_since,
 )
 from live_recorder.platforms.types import CommentDraft
 from live_recorder.recording.commands import (
@@ -49,6 +50,7 @@ from live_recorder.recording.policy import (
     INTERRUPTED,
     OFFLINE,
     classify_output,
+    leave_recording_open,
     next_action,
     recording_result,
 )
@@ -61,20 +63,36 @@ SENTINEL = object()
 
 
 def comment_job_result(
-    *, outcome: str, stored_count: int, has_gaps: bool, writer_failed: bool
+    *,
+    outcome: str,
+    stored_count: int,
+    has_gaps: bool,
+    writer_failed: bool,
+    dropped: int = 0,
 ) -> tuple[CommentJobStatus, str | None]:
-    """収集の終わり方から終端状態を決める。書き込み失敗は成功扱いにしない。"""
+    """収集の終わり方から終端状態を決める。書き込み失敗や取りこぼしは成功扱いにしない。"""
+    missed = has_gaps or dropped > 0
     if writer_failed and outcome in {"stopped", "ended", "offline"}:
         outcome = "comment_writer_failed"
     if outcome == "access_denied":
         return CommentJobStatus.FAILED, "restricted or age restricted"
-    if stored_count == 0 and outcome not in {"stopped", "ended", "offline"}:
+    if stored_count == 0 and not missed and outcome not in {"stopped", "ended", "offline"}:
         return CommentJobStatus.FAILED, outcome[:2000]
-    if has_gaps or outcome not in {"stopped", "ended", "offline"}:
-        status = CommentJobStatus.PARTIAL if stored_count or has_gaps else CommentJobStatus.FAILED
+    if missed or outcome not in {"stopped", "ended", "offline"}:
+        status = CommentJobStatus.PARTIAL if stored_count or missed else CommentJobStatus.FAILED
         error = outcome[:2000] if outcome not in {"stopped", "ended", "offline"} else None
         return status, error
     return CommentJobStatus.COMPLETED, None
+
+
+def comment_gaps_for_job(gaps, job) -> list:
+    """この収集が始まった後のコメント欠損だけを見る。"""
+    started = getattr(job, "started_at", None)
+    return [
+        gap
+        for gap in gaps
+        if gap.job_type == "comments" and (started is None or gap.started_at >= started)
+    ]
 
 
 def next_comment_wait(attempt: int, error: str | None, block_remaining: float) -> float:
@@ -198,10 +216,7 @@ async def _watch_stop(db: Database, stop: asyncio.Event, job_id: int, session_id
             stream = await session.get(
                 __import__("live_recorder.db.models", fromlist=["StreamSession"]).StreamSession, session_id
             )
-            if job is not None and job.cancel_requested:
-                stop.set()
-                return
-            if stream is not None and stream.status == "ENDED":
+            if job is None or stream is None or job.cancel_requested or stream.status == "ENDED":
                 stop.set()
                 return
         try:
@@ -279,6 +294,9 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             if early is None:
                 async with db.session() as session:
                     repo = Repository(session)
+                    locked = await repo.lock_session(session_id)
+                    if locked is None or locked.status == "ENDED":
+                        break
                     job = await repo.get_recording_job(job_id)
                     if job is None or job.cancel_requested:
                         break
@@ -328,14 +346,25 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             has_media = False
             obsolete = None
             if path is not None and path.is_file() and path.stat().st_size > 0:
-                final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
-                final_path = final.path
-                validation = final.validation
-                container = final.container
-                duration = final.duration_ms
-                size = final.size
-                has_media = final.has_media
-                obsolete = final.obsolete
+                try:
+                    final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
+                except Exception:
+                    log.exception("finalize failed for %s", path)
+                    final_path = path
+                    validation = "invalid"
+                    has_media = False
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = outcome.size
+                else:
+                    final_path = final.path
+                    validation = final.validation
+                    container = final.container
+                    duration = final.duration_ms
+                    size = final.size
+                    has_media = final.has_media
+                    obsolete = final.obsolete
             drop_segment = opened and size == 0
             async with db.session() as session:
                 repo = Repository(session)
@@ -418,6 +447,15 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             job = await repo.get_recording_job(job_id)
             stream = await repo.get_session(session_id)
             if job is None:
+                return
+            if leave_recording_open(
+                stopped=stop.is_set(),
+                cancel_requested=job.cancel_requested,
+                stream_status=stream.status if stream is not None else None,
+            ):
+                if job.status in {RecordingStatus.STARTING.value, RecordingStatus.RECORDING.value}:
+                    repo.move_recording(job, RecordingStatus.RECONNECTING)
+                await session.commit()
                 return
             has_media = await repo.any_valid_segment(job_id)
             gaps = await repo.gaps_for_session(session_id)
@@ -533,13 +571,16 @@ async def _batch_writer(db: Database, session_id: int, job_id: int, queue: async
         sink.dropped = 0
 
 
-async def _remember_room(db: Database, session_id: int, room_id: str | None, info: dict | None) -> None:
+async def _remember_room(db: Database, session_id: int, room_id: str | None, info: dict | None) -> bool:
+    """空の部屋 ID は埋める。別の配信の ID は書かず、混ぜない。"""
     stream_id, title, started = room_fields(info)
     chosen = room_id or stream_id
     async with db.session() as session:
         stream = await Repository(session).get_session(session_id)
         if stream is None:
-            return
+            return False
+        if chosen and stream.platform_stream_id and stream.platform_stream_id != chosen:
+            return False
         if chosen and not stream.platform_stream_id:
             stream.platform_stream_id = chosen
         if title and not stream.title:
@@ -547,6 +588,7 @@ async def _remember_room(db: Database, session_id: int, room_id: str | None, inf
         if started and not stream.platform_started_at:
             stream.platform_started_at = started
         await session.commit()
+    return True
 
 
 async def _collect_tiktok(
@@ -568,7 +610,9 @@ async def _collect_tiktok(
     async def on_connect(event: object) -> None:
         room_id = getattr(event, "room_id", None)
         info = getattr(client, "room_info", None)
-        await on_room(str(room_id) if room_id else None, info if isinstance(info, dict) else None)
+        matched = await on_room(str(room_id) if room_id else None, info if isinstance(info, dict) else None)
+        if matched is False:
+            stop.set()
 
     @client.on(CommentEvent)
     async def on_comment(event: object) -> None:
@@ -597,10 +641,15 @@ async def _collect_tiktok(
         stop_task = asyncio.create_task(stop.wait())
         await asyncio.wait({connect_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         if stop.is_set():
+            connect_task.cancel()
             try:
                 await client.disconnect()
             except Exception:
-                connect_task.cancel()
+                pass
+            try:
+                await connect_task
+            except (asyncio.CancelledError, Exception):
+                pass
             return "stopped"
         stop_task.cancel()
         error = connect_task.exception() if connect_task.done() else None
@@ -628,12 +677,12 @@ async def _collect_twitcasting(
     stop: asyncio.Event,
     sink: CommentSink,
     poll_seconds: int,
-    on_initial_gap,
+    on_gap,
 ) -> str:
     last_id: str | None = None
     first = True
     while not stop.is_set():
-        drafts, total, error = await tc.fetch_comments(movie_id, slice_id=last_id)
+        drafts, total, error, truncated = await fetch_comments_since(tc, movie_id, last_id)
         if error:
             sink.reconnects += 1
             if sink.reconnects > sink.max_reconnects:
@@ -644,15 +693,19 @@ async def _collect_twitcasting(
                 continue
             continue
         if first and total is not None and total > len(drafts):
-            await on_initial_gap()
+            await on_gap("comments_before_collector")
         first = False
-        numeric = [int(item.platform_comment_id) for item in drafts if item.platform_comment_id and item.platform_comment_id.isdigit()]
+        if truncated:
+            await on_gap("comments_page_truncated")
+        numeric = [
+            int(item.platform_comment_id)
+            for item in drafts
+            if item.platform_comment_id and item.platform_comment_id.isdigit()
+        ]
         if numeric:
             last_id = str(max(numeric))
-        for draft in sorted(drafts, key=lambda item: int(item.platform_comment_id or 0)):
+        for draft in drafts:
             await sink.add(draft)
-        if len(drafts) >= 50:
-            continue
         try:
             await asyncio.wait_for(stop.wait(), poll_seconds)
         except TimeoutError:
@@ -724,12 +777,12 @@ async def run_comment_job(
             elif obs_restricted(await tc.current_live(user_id)):
                 outcome = "access_denied"
             else:
-                async def mark_gap() -> None:
+                async def mark_gap(reason: str) -> None:
                     async with db.session() as session:
                         repo = Repository(session)
                         stream = await repo.get_session(session_id)
                         started = stream.detected_at if stream else utcnow()
-                        await repo.add_gap(session_id, "comments", started, utcnow(), "comments_before_collector")
+                        await repo.add_gap(session_id, "comments", started, utcnow(), reason)
                         await session.commit()
 
                 outcome = await _collect_twitcasting(
@@ -752,12 +805,13 @@ async def run_comment_job(
         if job is None:
             return
         job.reconnect_count = sink.reconnects
-        gaps = [gap for gap in await repo.gaps_for_session(session_id) if gap.job_type == "comments"]
+        gaps = comment_gaps_for_job(await repo.gaps_for_session(session_id), job)
         target, error = comment_job_result(
             outcome=outcome,
             stored_count=job.stored_count,
             has_gaps=bool(gaps),
             writer_failed=writer_failed or sink.writer_failed,
+            dropped=job.error_count,
         )
         if error:
             job.last_error = error
@@ -806,9 +860,9 @@ def _write_comment_file(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_bytes(body)
 
 
-def _refresh_ass(video: Path, ffprobe: str) -> None:
+async def _refresh_ass(video: Path, ffprobe: str) -> None:
     try:
-        refresh_combined_ass(video, ffprobe=ffprobe)
+        await asyncio.to_thread(refresh_combined_ass, video, ffprobe=ffprobe)
     except Exception:
         log.exception("combined ass failed")
 
@@ -816,16 +870,6 @@ def _refresh_ass(video: Path, ffprobe: str) -> None:
 async def _auto_export(settings: Settings, repo: Repository, session_id: int, job, tz_name: str) -> None:
     try:
         stream = await repo.get_session(session_id)
-        comments = await repo.export_comments(
-            session_id=session_id,
-            text=None,
-            user_id=None,
-            nickname=None,
-            streamer_id=None,
-            platform=None,
-            start=None,
-            end=None,
-        )
         stored = [segment for segment in await repo.segments_for_session(session_id) if not segment.file_removed]
         windows = [
             ExportSegment(
@@ -839,6 +883,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
         ]
         written: list[Path] = []
         if windows:
+            comments = await repo.export_comments_for_segments(session_id, windows)
             groups = partition_by_segment(
                 comments,
                 windows,
@@ -851,7 +896,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                 target = video.with_name(comment_export_name(window.file_name))
                 if not grouped:
                     target.unlink(missing_ok=True)
-                    _refresh_ass(video, settings.ffprobe_path)
+                    await _refresh_ass(video, settings.ffprobe_path)
                     continue
                 rows = [
                     _comment_row(
@@ -863,9 +908,19 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                     for comment in grouped
                 ]
                 _write_comment_file(target, rows)
-                _refresh_ass(video, settings.ffprobe_path)
+                await _refresh_ass(video, settings.ffprobe_path)
                 written.append(target)
         else:
+            comments = await repo.export_comments(
+                session_id=session_id,
+                text=None,
+                user_id=None,
+                nickname=None,
+                streamer_id=None,
+                platform=None,
+                start=None,
+                end=None,
+            )
             rows = [
                 _comment_row(comment, tz_name, stream, comment.recording_offset_ms) for comment in comments
             ]
@@ -913,7 +968,14 @@ async def close_recording_if_idle(
                 assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
                 continue
             if path.is_file() and path.stat().st_size > 0:
-                final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
+                try:
+                    final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
+                except Exception:
+                    log.exception("finalize failed for %s", segment.file_path)
+                    segment.finished_at = utcnow()
+                    segment.validation_status = "invalid"
+                    assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
+                    continue
                 segment.file_path = relative_to_root(settings.recordings_dir, final.path)
                 segment.file_size = final.size
                 segment.duration_ms = final.duration_ms

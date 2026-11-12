@@ -52,6 +52,11 @@ def recording_result(*, cancel_requested: bool, kind: str, has_media: bool, has_
     return "FAILED"
 
 
+def leave_recording_open(*, stopped: bool, cancel_requested: bool, stream_status: str | None) -> bool:
+    """ワーカー停止で配信が続いているときは、完了にせず次の起動の欠損へ回す。"""
+    return bool(stopped and not cancel_requested and stream_status not in {None, "ENDED"})
+
+
 def next_action(*, kind: str, bytes_written: int, attempt: int, max_attempts: int, engine_index: int, engine_count: int) -> str:
     """same / switch / stop のいずれかを返す。"""
     if kind in {ACCESS_DENIED, ENDED, STOPPED, OFFLINE}:

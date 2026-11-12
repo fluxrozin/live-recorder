@@ -19,6 +19,26 @@ def safe_token(value: str, *, fallback: str = "unknown") -> str:
     return cleaned
 
 
+_SEGMENT_TAIL = re.compile(r"(_seg\d+)$")
+
+
+def fit_export_name(stem: str, suffix: str, *, fallback: str) -> str:
+    """255 バイトに収める。セグメント番号は末尾に残す。"""
+    room = 255 - len(suffix.encode("utf-8"))
+    raw = stem.encode("utf-8")
+    if len(raw) <= room:
+        return f"{stem}{suffix}"
+    match = _SEGMENT_TAIL.search(stem)
+    tail = match.group(1).encode("utf-8") if match else b""
+    if len(tail) >= room:
+        trimmed = raw[:room].decode("utf-8", errors="ignore").rstrip("._") or fallback
+        return f"{trimmed}{suffix}"
+    head = raw[: room - len(tail)].decode("utf-8", errors="ignore").rstrip("._")
+    if not head:
+        head = fallback
+    return f"{head}{tail.decode('utf-8')}{suffix}"
+
+
 def file_label(value: str | None, *, fallback: str, max_bytes: int) -> str:
     """ファイル名に入れる表示名。区切り文字と制御文字を除き、バイト長で切る。"""
     text = _TITLE_DROPPED.sub("", value or "")
@@ -72,10 +92,21 @@ def build_segment_path(
     stem = f"{prefix}{label}_{segment}"
     candidate = directory / f"{stem}{suffix}"
     counter = 2
-    while candidate.exists():
+    while _stem_taken(candidate):
         candidate = directory / f"{stem}_{counter}{suffix}"
         counter += 1
     return assert_under(root, candidate)
+
+
+def _stem_taken(candidate: Path) -> bool:
+    """同じ幹の TS か、確定済みの MP4 がある名前は使わない。"""
+    if candidate.exists():
+        return True
+    mp4 = candidate.with_suffix(".mp4")
+    if mp4 != candidate and mp4.exists():
+        return True
+    partial = candidate.with_suffix(".mp4.partial")
+    return partial != candidate and partial.exists()
 
 
 def resolve_stored(root: Path, relative: str) -> Path:

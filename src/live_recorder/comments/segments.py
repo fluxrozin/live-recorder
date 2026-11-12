@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from live_recorder.recording.files import fit_export_name
 from live_recorder.timeutil import ensure_aware
 
 COMMENT_EXPORT_SUFFIX = "_Comments.srt"
 _LEGACY_EXPORT_SUFFIXES = (".jsonl", ".csv", ".txt")
-_MAX_NAME_BYTES = 255
 
 
 @dataclass(frozen=True)
@@ -27,13 +27,7 @@ def comment_export_name(video_name: str) -> str:
     stem = Path(stem).stem.replace('"', "").replace("\r", "").replace("\n", "").strip()
     if not stem or stem in {".", ".."} or "/" in stem or "\\" in stem:
         stem = "comments"
-    room = _MAX_NAME_BYTES - len(COMMENT_EXPORT_SUFFIX.encode("utf-8"))
-    encoded = stem.encode("utf-8")
-    if len(encoded) > room:
-        stem = encoded[:room].decode("utf-8", errors="ignore").rstrip("._")
-    if not stem or stem in {".", ".."}:
-        stem = "comments"
-    return f"{stem}{COMMENT_EXPORT_SUFFIX}"
+    return fit_export_name(stem, COMMENT_EXPORT_SUFFIX, fallback="comments")
 
 
 def comment_sidecar_relatives(video_relative: str) -> list[str]:
@@ -61,6 +55,19 @@ def segment_end(started_at: datetime, duration_ms: int | None, finished_at: date
 
 def segment_offset_ms(anchor: datetime, started_at: datetime) -> int:
     return int((ensure_aware(anchor) - ensure_aware(started_at)).total_seconds() * 1000)
+
+
+def ordered_export_segments(segments: Sequence[ExportSegment]) -> tuple[ExportSegment, ...]:
+    return tuple(sorted(segments, key=lambda item: (ensure_aware(item.started_at), item.number, item.id)))
+
+
+def segment_comment_bounds(
+    ordered: Sequence[ExportSegment], index: int
+) -> tuple[datetime | None, datetime | None, datetime | None]:
+    """そのセグメントに入るコメントの開始、終了（含む）、次の開始（含まない）。"""
+    start = None if index == 0 else ordered[index].started_at
+    end_exclusive = ordered[index + 1].started_at if index + 1 < len(ordered) else None
+    return start, ordered[index].ended_at, end_exclusive
 
 
 def assign_segment(anchor: datetime, segments: Sequence[ExportSegment]) -> ExportSegment | None:

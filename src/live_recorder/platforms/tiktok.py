@@ -63,6 +63,20 @@ def pauses_tiktok_polling(error: str | None) -> bool:
     return code in {403, 429} or code >= 500
 
 
+def _live_room_id(data: dict) -> str | None:
+    """配信中の部屋 ID。status や汎用の id は部屋番号として使わない。"""
+    user = data.get("user") if isinstance(data.get("user"), dict) else {}
+    room = data.get("liveRoom") if isinstance(data.get("liveRoom"), dict) else {}
+    for source in (user, room):
+        for key in ("roomId", "room_id"):
+            value = source.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+                return str(value)
+    return None
+
+
 def _room_observation(body: Any) -> LiveObservation:
     if isinstance(body, dict) and body.get("message") == "user_not_found":
         return LiveObservation(status=LiveStatus.ERROR, error="user_not_found")
@@ -74,7 +88,10 @@ def _room_observation(body: Any) -> LiveObservation:
     except (TypeError, ValueError):
         return LiveObservation(status=LiveStatus.ERROR, error="invalid_response")
     if code == 2:
-        return LiveObservation(status=LiveStatus.LIVE)
+        return LiveObservation(
+            status=LiveStatus.LIVE,
+            platform_stream_id=_live_room_id(data if isinstance(data, dict) else {}),
+        )
     if code == 4:
         return LiveObservation(status=LiveStatus.OFFLINE)
     return LiveObservation(status=LiveStatus.ERROR, error=f"room_status_{code}")

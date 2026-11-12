@@ -50,6 +50,16 @@ def test_offline_and_live_come_from_room_status():
     )
     assert offline.status == LiveStatus.OFFLINE
     assert live.status == LiveStatus.LIVE
+    assert live.platform_stream_id is None
+    identified = asyncio.run(
+        check_tiktok(
+            "user.name",
+            client=client(
+                Web([Response(200, {"data": {"user": {"roomId": "42"}, "liveRoom": {"status": 2, "id": "999"}}})])
+            ),
+        )
+    )
+    assert identified.platform_stream_id == "42"
     preparing = asyncio.run(
         check_tiktok("user.name", client=client(Web([Response(200, {"data": {"liveRoom": {"status": 1}}})])))
     )

@@ -46,13 +46,14 @@ def plan_observation(
             stop_comments=has_open_session,
         )
     if observation.status in {LiveStatus.ERROR, LiveStatus.UNKNOWN}:
+        # 通信の失敗では配信を終わらせない。止めたスイッチだけは止める。
         return Plan(
             live_status=observation.status.value,
             session="keep" if has_open_session else "none",
             start_recording=False,
             start_comments=False,
-            stop_recording=False,
-            stop_comments=False,
+            stop_recording=bool(recording_open and not recording_enabled),
+            stop_comments=bool(comments_open and (not comments_enabled or not comments_global)),
             note=observation.error,
         )
     if observation.status == LiveStatus.OFFLINE:

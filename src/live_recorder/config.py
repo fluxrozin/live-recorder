@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from sqlalchemy.engine import URL, make_url
 
@@ -91,7 +91,8 @@ def _render_url(url: URL) -> str:
         host = f"[{host}]"
     port = f":{url.port}" if url.port else ""
     database = quote(url.database or "", safe="")
-    return f"{url.drivername}://{username}:{password}@{host}{port}/{database}"
+    query = f"?{urlencode(url.query)}" if url.query else ""
+    return f"{url.drivername}://{username}:{password}@{host}{port}/{database}{query}"
 
 
 def load_settings() -> Settings:

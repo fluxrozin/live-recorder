@@ -14,6 +14,7 @@ from live_recorder.recording.policy import (
     INTERRUPTED,
     OFFLINE,
     STOPPED,
+    leave_recording_open,
     next_action,
     recording_result,
 )
@@ -64,6 +65,27 @@ def test_filename_uses_platform_user_time_and_title(tmp_path: Path):
     assert long_name.name.startswith("tiktok_@9ri_pi_20261110_010756_")
     assert long_name.name.endswith("_seg01.ts")
     assert safe_token("../../x") == "x"
+    occupied = build_segment_path(
+        root=tmp_path,
+        platform="tiktok",
+        user_id="guest",
+        when_stamp="20261109_210000",
+        day="2026-11-09",
+        title="同じ秒",
+        segment_number=1,
+    )
+    occupied.with_suffix(".mp4").write_bytes(b"old")
+    again = build_segment_path(
+        root=tmp_path,
+        platform="tiktok",
+        user_id="guest",
+        when_stamp="20261109_210000",
+        day="2026-11-09",
+        title="同じ秒",
+        segment_number=1,
+    )
+    assert again.name == occupied.name.removesuffix(".ts") + "_2.ts"
+    assert occupied.with_suffix(".mp4").read_bytes() == b"old"
 
 
 def test_resolve_rejects_escape(tmp_path: Path):
@@ -171,6 +193,17 @@ def test_scan_finds_missing_unregistered_and_temp(tmp_path: Path):
     assert any(item.endswith("extra.mp4") for item in report.unregistered)
     assert any(item.endswith(".part") for item in report.temporary)
     assert any(item.endswith("clip.mp4") for item in report.suspect)
+    (kept / "clip.mp4.partial").write_bytes(b"p")
+    (kept / ".remux-abc.mp4.partial").write_bytes(b"r")
+    again = scan_storage(
+        tmp_path,
+        [
+            {"file_path": "tiktok/a/clip.mp4", "file_size": 4, "validation": "ok", "finished": True, "file_removed": False},
+        ],
+    )
+    assert any(item.endswith(".mp4.partial") for item in again.temporary)
+    assert again.ok == 1
+    assert again.checked == 1
 
 
 def test_comment_failure_still_has_a_terminal_state():
@@ -186,8 +219,55 @@ def test_comment_failure_still_has_a_terminal_state():
     done, clean = comment_job_result(outcome="stopped", stored_count=3, has_gaps=False, writer_failed=False)
     assert done == CommentJobStatus.COMPLETED
     assert clean is None
+    dropped, _dropped_error = comment_job_result(
+        outcome="stopped", stored_count=3, has_gaps=False, writer_failed=False, dropped=2
+    )
+    assert dropped == CommentJobStatus.PARTIAL
     assert next_comment_wait(1, "http_403", 300) >= 300
     assert next_comment_wait(1, "timeout", 0) <= 120
+    assert leave_recording_open(stopped=True, cancel_requested=False, stream_status="LIVE")
+    assert not leave_recording_open(stopped=True, cancel_requested=False, stream_status="ENDED")
+    assert not leave_recording_open(stopped=True, cancel_requested=True, stream_status="LIVE")
+
+
+def test_scan_ok_count_ignores_the_display_cap(tmp_path: Path):
+    segments = [
+        {
+            "file_path": f"missing-{index}.mp4",
+            "file_size": 1,
+            "validation": "ok",
+            "finished": True,
+            "file_removed": False,
+        }
+        for index in range(250)
+    ]
+    report = scan_storage(tmp_path, segments)
+    assert report.checked == 250
+    assert report.ok == 0
+    assert len(report.missing) == 200
+
+
+async def test_empty_live_body_is_not_offline():
+    import httpx
+
+    from live_recorder.domain.enums import LiveStatus
+    from live_recorder.platforms.twitcasting import TwitCastingClient
+
+    def empty(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    def ended(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"movie": {"id": "1", "is_live": False}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(empty)) as http:
+        client = TwitCastingClient(client_id="id", client_secret="secret", access_token="", client=http)
+        observation = await client.current_live("caster")
+    assert observation.status == LiveStatus.ERROR
+    assert observation.error == "invalid_response"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(ended)) as http:
+        client = TwitCastingClient(client_id="id", client_secret="secret", access_token="", client=http)
+        observation = await client.current_live("caster")
+    assert observation.status == LiveStatus.OFFLINE
 
 
 async def test_open_live_hls_uses_streamserver_not_api_hls_url():
@@ -295,3 +375,112 @@ def test_cancel_stops_the_recording_process():
         raise AssertionError("cancel was swallowed")
 
     asyncio.run(run())
+
+
+def _comment(number: int):
+    from datetime import datetime, timezone
+
+    from live_recorder.platforms.types import CommentDraft
+
+    return CommentDraft(str(number), "u", "n", f"m{number}", None, datetime.now(timezone.utc))
+
+
+class _CommentPages:
+    def __init__(self):
+        self.calls = []
+        self.all_ids = list(range(180, 0, -1))
+
+    async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+        self.calls.append((slice_id, offset))
+        if slice_id is not None:
+            newer = [item for item in self.all_ids if item > int(slice_id)]
+            return [_comment(item) for item in newer[:limit]], 180, None
+        start = 0 if offset is None else offset
+        page = self.all_ids[start : start + limit]
+        return [_comment(item) for item in page], 180, None
+
+
+async def test_comments_since_backfills_when_a_page_is_full():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    pages = _CommentPages()
+    drafts, total, error, truncated = await fetch_comments_since(pages, "55", "100")
+    assert error is None and truncated is False and total == 180
+    assert [int(item.platform_comment_id) for item in drafts] == list(range(101, 181))
+    assert pages.calls == [("100", None), (None, 0), (None, 50)]
+
+
+async def test_comments_since_keeps_a_short_page_without_walking_history():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    pages = _CommentPages()
+    drafts, _, error, truncated = await fetch_comments_since(pages, "55", "170")
+    assert error is None and truncated is False
+    assert [int(item.platform_comment_id) for item in drafts] == list(range(171, 181))
+    assert pages.calls == [("170", None)]
+    first, total, error, truncated = await fetch_comments_since(pages, "55", None)
+    assert error is None and truncated is False and total == 180
+    assert len(first) == 50
+    assert pages.calls[-1] == (None, None)
+
+
+async def test_comments_since_marks_a_gap_when_the_walk_stops_early():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    pages = _CommentPages()
+    drafts, _, error, truncated = await fetch_comments_since(pages, "55", "100", max_pages=1)
+    assert error is None and truncated is True
+    assert [int(item.platform_comment_id) for item in drafts] == list(range(131, 181))
+
+
+async def test_comments_since_drops_nothing_into_the_cursor_when_backfill_fails():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    class Broken:
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            if slice_id is not None:
+                return [_comment(item) for item in range(180, 130, -1)], 180, None
+            return [], None, "rate_limited"
+
+    drafts, _, error, truncated = await fetch_comments_since(Broken(), "55", "100")
+    assert drafts == [] and error == "rate_limited" and truncated is False
+
+
+async def test_collect_twitcasting_backfills_without_a_tight_loop():
+    import asyncio
+
+    from live_recorder.monitor.jobs import _collect_twitcasting
+
+    stop = asyncio.Event()
+
+    class Sink:
+        def __init__(self):
+            self.items: list[int] = []
+            self.reconnects = 0
+            self.max_reconnects = 2
+
+        async def add(self, draft):
+            self.items.append(int(draft.platform_comment_id))
+            if 101 in self.items and 180 in self.items:
+                stop.set()
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+            self.pages = _CommentPages()
+
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            self.calls.append((slice_id, offset))
+            if slice_id is None and offset is None:
+                return [_comment(100)], 1, None
+            return await self.pages.fetch_comments(movie_id, slice_id=slice_id, limit=limit, offset=offset)
+
+    async def on_gap(_reason: str) -> None:
+        return None
+
+    fake = Fake()
+    sink = Sink()
+    outcome = await asyncio.wait_for(_collect_twitcasting(fake, "55", stop, sink, 0, on_gap), 2)
+    assert outcome == "stopped"
+    assert sink.items == [100, *range(101, 181)]
+    assert fake.calls == [(None, None), ("100", None), (None, 0), (None, 50)]

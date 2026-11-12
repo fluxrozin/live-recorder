@@ -78,12 +78,12 @@ def test_transcribe_keeps_segment_text_and_uses_words_inside_it(tmp_path):
     assert model.calls[0] == base
     assert model.calls[1] == {**base, "word_timestamps": True}
     assert [(cue.start, cue.end, cue.text) for cue in cues] == [
-        (618.40, 621.10, "弟に連絡つかないのってやばいね"),
-        (9.90, 13.20, "自己紹介欄のURLから飛んでもらえると やってることいろいろわかるから"),
+        (618.17, 621.41, "弟に連絡つかないのってやばいね"),
+        (9.68, 14.0, "自己紹介欄のURLから飛んでもらえると やってることいろいろわかるから"),
     ]
 
 
-def test_refine_cue_times_drops_a_detached_word_and_keeps_text_when_words_leave_the_segment():
+def test_refine_cue_times_keeps_the_segment_when_words_do_not_cover_the_text():
     cue = _cue("弟に連絡つかないのってやばいね", start=618.17, end=621.41)
     words = (
         SpeechWord("弟", 618.20, 618.50),
@@ -92,11 +92,26 @@ def test_refine_cue_times_drops_a_detached_word_and_keeps_text_when_words_leave_
     )
     refined = refine_cue_times([cue], words)
     assert [(item.start, item.end, item.text) for item in refined] == [
-        (620.00, 621.19, "弟に連絡つかないのってやばいね"),
+        (618.17, 621.41, "弟に連絡つかないのってやばいね"),
     ]
     outside = _cue("ハートミーありがとう", start=18.0, end=18.98)
     spilling = (SpeechWord("ハートミーありがとう", 18.10, 20.40),)
     assert refine_cue_times([outside], spilling) == [outside]
+
+
+def test_refine_cue_times_snaps_when_one_run_covers_the_text():
+    cue = _cue("弟に連絡つかないのってやばいね", start=618.17, end=621.41)
+    words = (
+        SpeechWord("弟", 618.20, 618.50),
+        SpeechWord("に連絡つかないのって", 618.55, 620.40),
+        SpeechWord("やばいね", 620.40, 621.10),
+    )
+    refined = refine_cue_times([cue], words)
+    assert [(item.start, item.end, item.text) for item in refined] == [
+        (618.20, 621.10, "弟に連絡つかないのってやばいね"),
+    ]
+    unrelated = _cue("こんにちは", start=1.0, end=20.0)
+    assert refine_cue_times([unrelated], (SpeechWord("別の話", 18.0, 19.0),)) == [unrelated]
 
 
 def test_keep_stable_drops_reference_failures_and_extra_noise():
@@ -134,6 +149,10 @@ def test_keep_stable_drops_reference_failures_and_extra_noise():
         long,
         "123",
     ]
+    korean = keep_stable([_cue("안녕하세요여러분")])
+    assert [cue.text for cue in korean] == ["안녕하세요여러분"]
+    distant = keep_stable([_cue(long, start=0, end=1), _cue(long, start=100, end=101)])
+    assert [cue.text for cue in distant] == [long, long]
 
 
 def test_write_speech_srt_replaces_atomically_and_removes_empty(tmp_path):
@@ -164,6 +183,12 @@ def test_speech_name_stays_within_filename_limit():
     name = speech_export_name("a" * 300 + ".mp4")
     assert name.endswith("_Speech.srt")
     assert len(name.encode("utf-8")) <= 255
+    prefix = "tiktok_@user_20261110_010756_" + ("あ" * 80)
+    first = speech_export_name(prefix + "_seg01.ts")
+    second = speech_export_name(prefix + "_seg02.ts")
+    assert first.endswith("_seg01_Speech.srt")
+    assert second.endswith("_seg02_Speech.srt")
+    assert first != second
 
 
 def test_queue_does_not_change_recording_status():
@@ -215,6 +240,15 @@ def test_requeue_keeps_existing_srt_until_a_new_result_replaces_it():
         speech_srt_path="keep.srt",
     )
     assert requeue_speech(segment) == "queued"
+    unfinished = SimpleNamespace(
+        file_removed=False,
+        finished_at=None,
+        speech_status="failed",
+        speech_error="gpu failed",
+        speech_srt_path="keep.srt",
+    )
+    assert requeue_speech(unfinished) == "unfinished"
+    assert unfinished.speech_status == "failed"
     assert segment.speech_status == "pending"
     assert segment.speech_error is None
     assert segment.speech_srt_path == "keep.srt"
@@ -228,6 +262,142 @@ def test_requeue_keeps_existing_srt_until_a_new_result_replaces_it():
     assert speech_result_path(status="failed", produced=None, previous="keep.srt") == "keep.srt"
     assert speech_result_path(status="completed", produced="new.srt", previous="keep.srt") == "new.srt"
     assert speech_result_path(status="completed", produced=None, previous="keep.srt") is None
+
+
+def _wav_seconds(path):
+    import wave
+
+    with wave.open(str(path)) as handle:
+        assert handle.getnchannels() == 1
+        assert handle.getframerate() == 16000
+        return handle.getnframes() / handle.getframerate()
+
+
+def _run_ffmpeg(*args: str) -> None:
+    import subprocess
+
+    completed = subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args],
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        pytest.skip("ffmpeg test source is unavailable")
+
+
+def test_extract_audio_keeps_the_video_timeline(tmp_path):
+    import shutil
+
+    from live_recorder.speech.audio import extract_audio
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg test source is unavailable")
+    lead = tmp_path / "lead.mp4"
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=5",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-filter_complex",
+        "[1:a]asetpts=PTS+2/TB[a]",
+        "-map",
+        "0:v",
+        "-map",
+        "[a]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-t",
+        "5",
+        str(lead),
+    )
+    late = tmp_path / "late.ts"
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=4",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-filter_complex",
+        "[1:a]asetpts=PTS+2/TB[a]",
+        "-map",
+        "0:v",
+        "-map",
+        "[a]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-f",
+        "mpegts",
+        "-output_ts_offset",
+        "1000",
+        str(late),
+    )
+    part1 = tmp_path / "part1.ts"
+    part2 = tmp_path / "part2.ts"
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-f",
+        "mpegts",
+        str(part1),
+    )
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=880:duration=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-f",
+        "mpegts",
+        "-output_ts_offset",
+        "5",
+        str(part2),
+    )
+    gap = tmp_path / "gap.ts"
+    gap.write_bytes(part1.read_bytes() + part2.read_bytes())
+    lead_wav = tmp_path / "lead.wav"
+    late_wav = tmp_path / "late.wav"
+    gap_wav = tmp_path / "gap.wav"
+    extract_audio("ffmpeg", lead, lead_wav)
+    extract_audio("ffmpeg", late, late_wav)
+    extract_audio("ffmpeg", gap, gap_wav)
+    assert 2.8 < _wav_seconds(lead_wav) < 3.4
+    assert 2.8 < _wav_seconds(late_wav) < 3.4
+    assert 6.5 < _wav_seconds(gap_wav) < 7.2
 
 
 def test_speech_settings_accept_known_model_and_language():

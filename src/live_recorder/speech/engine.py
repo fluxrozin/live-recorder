@@ -21,7 +21,7 @@ def load_whisper(model_name: str, download_root: Path):
 
 
 def transcribe(model, audio_path: Path, *, language: str) -> list:
-    """セグメントの文章を残し、区間の内側にある語の時刻へ開始と終了を寄せる。"""
+    """セグメントの文章を残し、本文の先頭と末尾に合う語の時刻へ開始と終了を寄せる。"""
     from live_recorder.speech.quality import (
         SpeechCue,
         SpeechWord,

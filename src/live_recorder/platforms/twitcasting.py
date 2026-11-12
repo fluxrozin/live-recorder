@@ -228,8 +228,10 @@ class TwitCastingClient:
             body = response.json()
         except ValueError:
             return LiveObservation(status=LiveStatus.ERROR, error="invalid_json")
-        movie = body.get("movie") if isinstance(body, dict) else None
-        if not isinstance(movie, dict) or not movie.get("is_live"):
+        if not isinstance(body, dict) or not isinstance(body.get("movie"), dict):
+            return LiveObservation(status=LiveStatus.ERROR, error="invalid_response")
+        movie = body["movie"]
+        if not movie.get("is_live"):
             return LiveObservation(status=LiveStatus.OFFLINE)
         restricted = bool(movie.get("is_protected")) or bool(movie.get("is_membership"))
         started = movie.get("created")
@@ -249,13 +251,20 @@ class TwitCastingClient:
         )
 
     async def fetch_comments(
-        self, movie_id: str, *, slice_id: str | None = None, limit: int = 50
+        self,
+        movie_id: str,
+        *,
+        slice_id: str | None = None,
+        limit: int = 50,
+        offset: int | None = None,
     ) -> tuple[list[CommentDraft], int | None, str | None]:
         if not movie_id.isdigit():
             return [], None, "invalid_movie_id"
         params: dict[str, object] = {"limit": max(1, min(limit, 50))}
         if slice_id:
             params["slice_id"] = slice_id
+        elif offset is not None:
+            params["offset"] = int(offset)
         try:
             response = await self._request("GET", f"/movies/{movie_id}/comments", params=params)
         except httpx.HTTPError as exc:
@@ -277,3 +286,74 @@ class TwitCastingClient:
         drafts = [comment_from_api(item) for item in raw_comments or [] if isinstance(item, dict)]
         total = int(all_count) if isinstance(all_count, int) else None
         return drafts, total, None
+
+
+_COMMENT_PAGE = 50
+_MAX_COMMENT_PAGES = 40
+
+
+def _comment_number(draft: CommentDraft) -> int | None:
+    cid = draft.platform_comment_id
+    if cid and cid.isdigit():
+        return int(cid)
+    return None
+
+
+def _sorted_comments(drafts: list[CommentDraft]) -> list[CommentDraft]:
+    return sorted(drafts, key=lambda item: _comment_number(item) or 0)
+
+
+async def fetch_comments_since(
+    client: TwitCastingClient,
+    movie_id: str,
+    last_id: str | None,
+    *,
+    max_pages: int = _MAX_COMMENT_PAGES,
+) -> tuple[list[CommentDraft], int | None, str | None, bool]:
+    """last_id より新しいコメントを id 順で返す。
+
+    4つ目が True のときは、上限までさかのぼっても前回の ID に届かなかった。
+    エラーのときは空を返し、呼び出し側はカーソルを進めない。
+    最初の取得（last_id が無いとき）は最新の1ページだけで、過去は埋めない。
+    """
+    if last_id is None:
+        drafts, total, error = await client.fetch_comments(movie_id, limit=_COMMENT_PAGE)
+        if error:
+            return [], total, error, False
+        return _sorted_comments(drafts), total, None, False
+
+    page, total, error = await client.fetch_comments(movie_id, slice_id=last_id, limit=_COMMENT_PAGE)
+    if error:
+        return [], total, error, False
+    if len(page) < _COMMENT_PAGE or not str(last_id).isdigit():
+        return _sorted_comments(page), total, None, False
+
+    threshold = int(last_id)
+    collected: list[CommentDraft] = []
+    seen: set[str] = set()
+    offset = 0
+    reached = False
+    pages = 0
+    while pages < max_pages:
+        batch, total, error = await client.fetch_comments(movie_id, limit=_COMMENT_PAGE, offset=offset)
+        pages += 1
+        if error:
+            return [], total, error, False
+        if not batch:
+            reached = True
+            break
+        numbers: list[int] = []
+        for draft in batch:
+            number = _comment_number(draft)
+            if number is None:
+                continue
+            numbers.append(number)
+            cid = draft.platform_comment_id or ""
+            if number > threshold and cid not in seen:
+                seen.add(cid)
+                collected.append(draft)
+        if not numbers or min(numbers) <= threshold or len(batch) < _COMMENT_PAGE:
+            reached = True
+            break
+        offset += len(batch)
+    return _sorted_comments(collected), total, None, not reached

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import uuid
 from pathlib import Path
 
 from live_recorder.comments.export import render_srt
@@ -180,7 +181,7 @@ def refresh_combined_ass(
         return None
     width, height = play_size or probe_display_size(ffprobe, video)
     body = render_ass(speech, comments, width=width, height=height)
-    temporary = target.with_name(f".{target.name}.tmp")
+    temporary = target.with_name(f".ass-{uuid.uuid4().hex[:12]}.tmp")
     try:
         temporary.write_text(body, encoding="utf-8-sig")
         temporary.replace(target)

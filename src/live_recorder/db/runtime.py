@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 from dataclasses import asdict, dataclass, fields
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from live_recorder.db.models import SystemSetting
@@ -16,6 +19,8 @@ QUALITIES = ("best", "high", "medium")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 SPEECH_MODELS = ("large-v3", "large-v3-turbo")
 _SPEECH_LANGUAGE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})?$")
+_MAX_RETENTION_DAYS = 36500
+_MAX_FREE_GIB = 1_000_000
 
 
 @dataclass
@@ -73,6 +78,8 @@ def validate_runtime(raw: dict[str, object]) -> RuntimeSettings:
         raise SettingsValidationError("最低空き容量は0以上です")
     if retention < 0 or comment_retention < 0:
         raise SettingsValidationError("保存期限は0以上です")
+    if retention > _MAX_RETENTION_DAYS or comment_retention > _MAX_RETENTION_DAYS:
+        raise SettingsValidationError(f"保存期限は{_MAX_RETENTION_DAYS}日までです")
     if not 0 <= reconnects <= 30:
         raise SettingsValidationError("再接続回数は0から30です")
     if not 5 <= poll <= 120:
@@ -144,15 +151,34 @@ async def load_runtime(session: AsyncSession) -> RuntimeSettings:
     return validate_runtime(raw)
 
 
+def _initial_timezone() -> str:
+    raw = os.environ.get("DISPLAY_TIMEZONE", "Asia/Tokyo").strip() or "Asia/Tokyo"
+    try:
+        ZoneInfo(raw)
+    except ZoneInfoNotFoundError:
+        return "Asia/Tokyo"
+    return raw
+
+
+def free_bytes_from_gib(raw: object) -> int:
+    try:
+        value = float(str(raw if raw not in (None, "") else "0"))
+    except (TypeError, ValueError) as exc:
+        raise SettingsValidationError("最低空き容量が不正です") from exc
+    if not math.isfinite(value) or value < 0 or value > _MAX_FREE_GIB:
+        raise SettingsValidationError("最低空き容量が不正です")
+    return int(value * 1024**3)
+
+
 async def ensure_runtime(session: AsyncSession) -> RuntimeSettings:
-    defaults = RuntimeSettings().as_json()
-    existing = {
-        row.key: row
-        for row in (await session.execute(select(SystemSetting))).scalars().all()
-    }
+    defaults = RuntimeSettings(display_timezone=_initial_timezone()).as_json()
+    now = utcnow()
     for key, value in defaults.items():
-        if key not in existing:
-            session.add(SystemSetting(key=key, value=json.dumps(value, ensure_ascii=False), updated_at=utcnow()))
+        await session.execute(
+            pg_insert(SystemSetting)
+            .values(key=key, value=json.dumps(value, ensure_ascii=False), updated_at=now)
+            .on_conflict_do_nothing(index_elements=["key"])
+        )
     await session.flush()
     return await load_runtime(session)
 

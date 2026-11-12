@@ -32,6 +32,7 @@ from live_recorder.db.repository import Repository, RepositoryError, assign_sort
 from live_recorder.db.runtime import (
     SettingsValidationError,
     ensure_runtime,
+    free_bytes_from_gib,
     load_runtime,
     save_runtime,
     validate_runtime,
@@ -166,7 +167,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def check_csrf(request: Request, form: dict) -> None:
         provided = str(form.get("csrf") or request.headers.get("x-csrf-token") or "")
         expected = str(request.session.get("csrf") or "")
-        if not expected or not provided or not secrets.compare_digest(expected, provided):
+        try:
+            same = bool(expected) and bool(provided) and secrets.compare_digest(expected, provided)
+        except TypeError:
+            same = False
+        if not same:
             raise HTTPException(status_code=403, detail="CSRF")
 
     async def runtime_tz(request: Request) -> str:
@@ -610,8 +615,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "name": Path(segment.file_path).name,
                         "speech_status": segment.speech_status or "NONE",
                         "speech_ready": (
-                            segment.speech_status == "completed"
-                            and not segment.file_removed
+                            not segment.file_removed
                             and bool(segment.speech_srt_path)
                             and _stored_file_exists(root, segment.speech_srt_path)
                         ),
@@ -634,7 +638,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return blocked
         async with request.app.state.db.session() as session:
             segment = await Repository(session).get_segment(segment_id)
-            if segment is None or segment.file_removed:
+            if segment is None or segment.file_removed or segment.finished_at is None:
                 raise HTTPException(404)
             relative = segment.file_path
             filename = Path(relative).name
@@ -671,7 +675,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return blocked
         async with request.app.state.db.session() as session:
             segment = await Repository(session).get_segment(segment_id)
-            if segment is None or segment.file_removed or segment.speech_status != "completed":
+            if segment is None or segment.file_removed or not segment.speech_srt_path:
                 raise HTTPException(404)
             relative = segment.speech_srt_path
             if not relative:
@@ -709,20 +713,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if segment.file_removed:
                 raise HTTPException(404)
             relative = segment.file_path
-            stored = await repo.export_comments(
-                session_id=session_id,
-                text=None,
-                user_id=None,
-                nickname=None,
-                streamer_id=None,
-                platform=None,
-                start=None,
-                end=None,
-            )
+            windows = [_window(item) for item in await repo.segments_for_session(session_id)]
+            stored = await repo.export_comments_for_segments(session_id, windows, only_id=segment_id)
             rows: list[dict[str, object]] = []
             for window, grouped in partition_by_segment(
                 stored,
-                [_window(item) for item in await repo.segments_for_session(session_id)],
+                windows,
                 lambda comment: comment.posted_at or comment.received_at,
             ):
                 if window.id != segment_id:
@@ -904,6 +900,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "pending": ("すでに待ち行列に入っています", "info"),
             "running": ("処理中のため、終わってから再生成できます", "warning"),
             "removed": ("削除済みの録画は再生成できません", "warning"),
+            "unfinished": ("録画が終わってから再生成できます", "warning"),
         }
         text, tone = messages.get(outcome, ("再生成できません", "warning"))
         flash(request, text, tone)
@@ -921,6 +918,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
         async with request.app.state.db.session() as session:
             repo = Repository(session)
+            if await repo.deletion_blocked(session_id):
+                flash(request, "録画またはコメント収集が終わってから削除してください", "warning")
+                return RedirectResponse(f"/recordings/{session_id}", status_code=303)
             for segment in await repo.segments_for_session(session_id):
                 if segment.file_removed:
                     continue
@@ -951,6 +951,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         delete_files_too = form.get("delete_files") == "yes"
         async with request.app.state.db.session() as session:
             repo = Repository(session)
+            if await repo.deletion_blocked(session_id):
+                flash(request, "録画またはコメント収集が終わってから削除してください", "warning")
+                return RedirectResponse(f"/recordings/{session_id}", status_code=303)
             item = await repo.get_session(session_id)
             if item is None:
                 raise HTTPException(404)
@@ -1011,8 +1014,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             windows, selected = await _export_windows(repo, filters["query"], segment_id)
             if filters["query"].get("session_id") is None:
                 raise HTTPException(400)
-            _scope_comments_to_session(filters["query"])
-            found = await repo.export_comments(**filters["query"])
+            query = filters["query"]
+            if windows:
+                found = await repo.export_comments_for_segments(
+                    int(query["session_id"]),
+                    windows,
+                    only_id=selected,
+                    text=query.get("text"),
+                    user_id=query.get("user_id"),
+                    nickname=query.get("nickname"),
+                    received_start=query.get("start"),
+                    received_end=query.get("end"),
+                )
+            else:
+                _scope_comments_to_session(query)
+                found = await repo.export_comments(**query)
             body, media, filename = _comment_download(found, windows, selected, tz)
         return Response(
             content=body,
@@ -1059,7 +1075,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "monitor_interval_seconds": form.get("monitor_interval_seconds"),
                     "max_concurrent_recordings": form.get("max_concurrent_recordings"),
                     "recording_quality": form.get("recording_quality"),
-                    "min_free_bytes": int(float(str(form.get("min_free_gib") or "0")) * 1024**3),
+                    "min_free_bytes": free_bytes_from_gib(form.get("min_free_gib")),
                     "retention_days": form.get("retention_days"),
                     "auto_delete_enabled": _checked(form, "auto_delete_enabled"),
                     "tiktok_engine_order": order,
@@ -1075,7 +1091,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "speech_language": form.get("speech_language"),
                 }
             )
-        except (SettingsValidationError, ValueError) as exc:
+        except (SettingsValidationError, ValueError, OverflowError) as exc:
             env = request.app.state.settings
             return await render(
                 request,
@@ -1140,15 +1156,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for segment in segments
             ]
         report = scan_storage(request.app.state.settings.recordings_dir, payload_segments)
-        problems = set(report.missing) | set(report.size_mismatch) | set(report.suspect)
-        checked = [item for item in payload_segments if not item["file_removed"]]
         _remember_scan(
             request,
             report,
-            {
-                "checked": len(checked),
-                "ok": sum(1 for item in checked if item["file_path"] not in problems),
-            },
+            {"checked": report.checked, "ok": report.ok},
         )
         # 200 のまま返すとアドレスが /system/scan になり、定期更新の GET が 405 になる。
         return RedirectResponse("/system#scan", status_code=303)
@@ -1547,7 +1558,7 @@ _SPEECH_FILTERS = {"pending", "running", "completed", "failed", "skipped", "none
 def _speech_cue_count(root: Path, segments) -> int:
     total = 0
     for segment in segments:
-        if segment.file_removed or segment.speech_status != "completed" or not segment.speech_srt_path:
+        if segment.file_removed or not segment.speech_srt_path:
             continue
         try:
             path = resolve_stored(root, segment.speech_srt_path)
@@ -1594,11 +1605,7 @@ def _speech_filters(request: Request) -> dict:
 def _speech_row(segment, root: Path) -> dict:
     session = segment.job.session
     streamer = session.streamer
-    ready = (
-        segment.speech_status == "completed"
-        and bool(segment.speech_srt_path)
-        and _stored_file_exists(root, segment.speech_srt_path)
-    )
+    ready = bool(segment.speech_srt_path) and _stored_file_exists(root, segment.speech_srt_path)
     return {
         "id": segment.id,
         "session_id": session.id,
@@ -1611,7 +1618,7 @@ def _speech_row(segment, root: Path) -> dict:
         "speech_ready": ready,
         "speech_empty": segment.speech_status == "completed" and not segment.speech_srt_path,
         "speech_error": (segment.speech_error or "")[:160],
-        "can_requeue": segment.speech_status not in {"pending", "running"},
+        "can_requeue": segment.finished_at is not None and segment.speech_status not in {"pending", "running"},
     }
 
 

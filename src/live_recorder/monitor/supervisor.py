@@ -10,14 +10,26 @@ from datetime import timedelta
 from pathlib import Path
 
 from live_recorder.comments.ass import refresh_combined_ass, unlink_combined_ass
-from live_recorder.comments.segments import comment_text_relatives
-from live_recorder.monitor.jobs import _auto_export, close_recording_if_idle, run_comment_job, run_recording_job
+from live_recorder.comments.segments import comment_sidecar_relatives, comment_text_relatives
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import ensure_runtime, load_runtime
 from live_recorder.db.session import Database
 from live_recorder.domain.enums import CommentJobStatus, LiveStatus, RecordingStatus
-from live_recorder.monitor.planner import effective_interval, plan_observation, recovery_action, restart_gap_start
+from live_recorder.monitor.jobs import (
+    _auto_export,
+    close_recording_if_idle,
+    comment_gaps_for_job,
+    comment_job_result,
+    run_comment_job,
+    run_recording_job,
+)
+from live_recorder.monitor.planner import (
+    effective_interval,
+    plan_observation,
+    recovery_action,
+    restart_gap_start,
+)
 from live_recorder.platforms.tiktok import TikTokChecks
 from live_recorder.platforms.twitcasting import TwitCastingClient
 from live_recorder.platforms.types import LiveObservation
@@ -244,8 +256,6 @@ class Supervisor:
     async def check_one(self, streamer_id: int) -> None:
         lock = self.locks.setdefault(streamer_id, asyncio.Lock())
         async with lock:
-            if self.next_ok.get(streamer_id, 0) > time.monotonic():
-                return
             async with self.db.session() as session:
                 repo = Repository(session)
                 streamer = await repo.get_streamer(streamer_id)
@@ -265,21 +275,30 @@ class Supervisor:
                 has_open = open_session is not None
                 rec_id = rec_job.id if rec_job else None
                 com_id = com_job.id if com_job else None
-            try:
-                observation = await self.observe(platform, user_id)
-            except Exception as exc:
-                log.info("observation failed for %s: %s", user_id, type(exc).__name__)
-                observation = LiveObservation(status=LiveStatus.ERROR, error=type(exc).__name__)
-            if observation.status in {LiveStatus.ERROR, LiveStatus.UNKNOWN}:
-                self.failures[streamer_id] = self.failures.get(streamer_id, 0) + 1
-                from live_recorder.monitor.planner import backoff_seconds
-
-                delay = backoff_seconds(self.failures[streamer_id])
-                if platform == "tiktok":
-                    delay = max(delay, self.tiktok.block_remaining())
-                self.next_ok[streamer_id] = time.monotonic() + delay
+            backoff = self.next_ok.get(streamer_id, 0) > time.monotonic()
+            needs_local = (not monitoring) or (rec_id is not None and not recording_enabled) or (
+                com_id is not None and (not comments_enabled or not runtime.comments_globally_enabled)
+            )
+            if backoff and not needs_local:
+                return
+            if backoff:
+                observation = LiveObservation(status=LiveStatus.ERROR, error="backoff")
             else:
-                self.failures[streamer_id] = 0
+                try:
+                    observation = await self.observe(platform, user_id)
+                except Exception as exc:
+                    log.info("observation failed for %s: %s", user_id, type(exc).__name__)
+                    observation = LiveObservation(status=LiveStatus.ERROR, error=type(exc).__name__)
+                if observation.status in {LiveStatus.ERROR, LiveStatus.UNKNOWN}:
+                    self.failures[streamer_id] = self.failures.get(streamer_id, 0) + 1
+                    from live_recorder.monitor.planner import backoff_seconds
+
+                    delay = backoff_seconds(self.failures[streamer_id])
+                    if platform == "tiktok":
+                        delay = max(delay, self.tiktok.block_remaining())
+                    self.next_ok[streamer_id] = time.monotonic() + delay
+                else:
+                    self.failures[streamer_id] = 0
             free = disk_free(self.settings.recordings_dir)
             disk_ok = allow_new_recording(free, runtime.min_free_bytes)
             if not disk_ok and not self.disk_low:
@@ -424,12 +443,7 @@ class Supervisor:
             if event is not None:
                 event.set()
             elif com.status not in {"COMPLETED", "PARTIAL", "FAILED", "DISABLED"}:
-                target = CommentJobStatus.PARTIAL if com.stored_count else CommentJobStatus.COMPLETED
-                try:
-                    repo.move_comments(com, target)
-                except Exception:
-                    com.status = target.value
-                com.finished_at = utcnow()
+                await self._finish_idle_comments(repo, session_id, com)
         ended = utcnow()
         await repo.close_open_gaps(session_id, "recording", ended)
         await repo.close_open_gaps(session_id, "comments", ended)
@@ -455,13 +469,25 @@ class Supervisor:
         if event is not None:
             event.set()
             return
-        target = CommentJobStatus.PARTIAL if com.stored_count else CommentJobStatus.COMPLETED
+        await self._finish_idle_comments(repo, session_id, com)
+        await repo.close_open_gaps(session_id, "comments", utcnow())
+
+    async def _finish_idle_comments(self, repo: Repository, session_id: int, com) -> None:
+        gaps = comment_gaps_for_job(await repo.gaps_for_session(session_id), com)
+        target, error = comment_job_result(
+            outcome="stopped",
+            stored_count=com.stored_count,
+            has_gaps=bool(gaps),
+            writer_failed=False,
+            dropped=com.error_count or 0,
+        )
         try:
             repo.move_comments(com, target)
         except Exception:
             com.status = target.value
+        if error:
+            com.last_error = error
         com.finished_at = utcnow()
-        await repo.close_open_gaps(session_id, "comments", utcnow())
 
     async def _ensure_recording(self, session_id: int) -> None:
         spawn_id: int | None = None
@@ -469,6 +495,9 @@ class Supervisor:
         async with self.recording_slots:
             async with self.db.session() as session:
                 repo = Repository(session)
+                locked = await repo.lock_session(session_id)
+                if locked is None or locked.status == "ENDED":
+                    return
                 existing = await repo.active_recording(session_id)
                 if existing is not None and ("rec", existing.id) in self.tasks:
                     return
@@ -501,6 +530,9 @@ class Supervisor:
     async def _ensure_comments(self, session_id: int) -> None:
         async with self.db.session() as session:
             repo = Repository(session)
+            locked = await repo.lock_session(session_id)
+            if locked is None or locked.status == "ENDED":
+                return
             existing = await repo.active_comments(session_id)
             if existing is not None and ("com", existing.id) in self.tasks:
                 return
@@ -590,7 +622,7 @@ class Supervisor:
             if not video.is_file():
                 continue
             try:
-                refresh_combined_ass(video, ffprobe=self.settings.ffprobe_path)
+                await asyncio.to_thread(refresh_combined_ass, video, ffprobe=self.settings.ffprobe_path)
             except Exception:
                 log.exception("combined ass failed")
 
@@ -610,6 +642,8 @@ class Supervisor:
         if path.is_file():
             path.unlink()
         unlink_speech_sidecar(path)
+        for sidecar in comment_sidecar_relatives(relative):
+            self._unlink_file(sidecar)
         unlink_combined_ass(path)
 
     async def _event(self, event_type: str, message: str, *, severity: str) -> None:

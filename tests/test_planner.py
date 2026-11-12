@@ -1,5 +1,5 @@
 
-from live_recorder.db.runtime import SettingsValidationError, validate_runtime
+from live_recorder.db.runtime import SettingsValidationError, free_bytes_from_gib, validate_runtime
 from live_recorder.domain.enums import (
     CommentJobStatus,
     LiveStatus,
@@ -93,6 +93,24 @@ def test_offline_is_not_confused_with_error():
     )
     assert unknown.session == "keep"
     assert not unknown.stop_recording
+    stopped = plan_observation(
+        monitoring_enabled=True,
+        recording_enabled=False,
+        comments_enabled=False,
+        comments_global=True,
+        observation=LiveObservation(status=LiveStatus.ERROR, error="timeout"),
+        has_open_session=True,
+        open_stream_id="1",
+        recording_active=True,
+        comments_active=True,
+        recording_slots_left=1,
+        disk_ok=True,
+        recording_open=True,
+        comments_open=True,
+    )
+    assert stopped.session == "keep"
+    assert stopped.stop_recording and stopped.stop_comments
+    assert not stopped.start_recording and not stopped.start_comments
 
 
 def test_restricted_stream_is_not_recorded():
@@ -127,6 +145,20 @@ def test_recovery_does_not_invent_success():
     assert recovery_action(still_live=None, has_media=True) == "wait"
     assert recovery_action(still_live=False, has_media=True) == "partial"
     assert recovery_action(still_live=True, has_media=False) == "resume"
+
+
+def test_settings_reject_unbounded_retention_and_disk_space():
+    try:
+        validate_runtime({"retention_days": 10**9})
+        raise AssertionError("huge retention was accepted")
+    except SettingsValidationError:
+        pass
+    try:
+        free_bytes_from_gib("1e309")
+        raise AssertionError("non-finite free space was accepted")
+    except SettingsValidationError:
+        pass
+    assert free_bytes_from_gib("1") == 1024**3
 
 
 def test_settings_reject_too_fast_and_bad_engine_order():

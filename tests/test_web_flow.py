@@ -76,6 +76,7 @@ async def _seed(settings) -> dict:
                 recording_job_id=job.id,
                 segment_number=1,
                 started_at=now,
+                finished_at=now,
                 file_path="tiktok/live_user/seg1.mp4",
                 file_size=1024,
             )
@@ -122,6 +123,7 @@ def client(tmp_path):
     ids = asyncio.run(_seed(settings))
     with TestClient(create_app(settings)) as test_client:
         test_client.ids = ids
+        test_client.settings = settings
         yield test_client
 
 
@@ -196,9 +198,54 @@ def test_pages_render_with_real_data(client):
     assert client.get("/comments/export?format=jsonl").status_code == 400
 
 
+async def _finish_jobs(settings, session_id: int) -> None:
+    db = Database(settings)
+    try:
+        async with db.session() as session:
+            repo = Repository(session)
+            recording = await repo.active_recording(session_id)
+            comments = await repo.active_comments(session_id)
+            now = utcnow()
+            if recording is not None:
+                recording.status = "COMPLETED"
+                recording.finished_at = now
+            if comments is not None:
+                comments.status = "COMPLETED"
+                comments.finished_at = now
+            await session.commit()
+    finally:
+        await db.dispose()
+
+
+def test_delete_is_refused_while_recording(client):
+    token = _login(client)
+    session_id = client.ids["session"]
+    media = client.settings.recordings_dir / "tiktok" / "live_user" / "seg1.mp4"
+    blocked = client.post(
+        f"/recordings/{session_id}/delete",
+        data={"csrf": token, "confirm": "yes"},
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 303
+    assert blocked.headers["location"] == f"/recordings/{session_id}"
+    detail = client.get(blocked.headers["location"])
+    assert detail.status_code == 200
+    assert "終わってから削除" in detail.text
+    assert media.is_file()
+    files = client.post(
+        f"/recordings/{session_id}/delete-files",
+        data={"csrf": token, "confirm": "yes"},
+        follow_redirects=False,
+    )
+    assert files.status_code == 303
+    assert files.headers["location"] == f"/recordings/{session_id}"
+    assert media.is_file()
+
+
 def test_recording_history_delete_keeps_database_constraints(client):
     token = _login(client)
     session_id = client.ids["session"]
+    asyncio.run(_finish_jobs(client.settings, session_id))
     removed = client.post(
         f"/recordings/{session_id}/delete",
         data={"csrf": token, "confirm": "yes"},
