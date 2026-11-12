@@ -12,11 +12,13 @@ function Convert-ToWslPath([string] $path) {
     return ($converted | Out-String).Trim()
 }
 
+$icons = Join-Path $out "icons"
+New-Item -ItemType Directory -Force -Path $icons | Out-Null
 $render = Join-Path $here "render_icons.py"
 $rendered = $false
 foreach ($candidate in @("python", "python3", "py")) {
     if (Get-Command $candidate -ErrorAction SilentlyContinue) {
-        & $candidate $render $out
+        & $candidate $render $icons
         if ($LASTEXITCODE -ne 0) { throw "icon render failed" }
         $rendered = $true
         break
@@ -24,26 +26,32 @@ foreach ($candidate in @("python", "python3", "py")) {
 }
 if (-not $rendered) {
     $wslRender = Convert-ToWslPath $render
-    $wslOut = Convert-ToWslPath $out
-    & wsl.exe -e python3 $wslRender $wslOut
+    $wslIcons = Convert-ToWslPath $icons
+    & wsl.exe -e python3 $wslRender $wslIcons
     if ($LASTEXITCODE -ne 0) {
-        & wsl.exe -e bash -lc "python3 '$wslRender' '$wslOut'"
+        & wsl.exe -e bash -lc "python3 '$wslRender' '$wslIcons'"
         if ($LASTEXITCODE -ne 0) { throw "icon render failed" }
     }
 }
 
-$csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-if (-not (Test-Path $csc)) { throw "csc.exe not found" }
-$fx = Split-Path $csc
-& $csc /nologo /target:winexe /utf8output /codepage:65001 `
-    /reference:"$fx\System.Windows.Forms.dll" `
-    /reference:"$fx\System.Drawing.dll" `
-    /win32icon:"$out\idle.ico" `
-    /resource:"$out\idle.ico",idle.ico `
-    /resource:"$out\recording.ico",recording.ico `
-    /resource:"$out\stopped.ico",stopped.ico `
-    /resource:"$out\busy.ico",busy.ico `
-    /out:"$out\LiveRecorderTray.exe" `
-    (Join-Path $here "TrayApp.cs")
-if ($LASTEXITCODE -ne 0) { throw "csc failed" }
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    throw ".NET 10 SDK is not installed. Install it from https://dotnet.microsoft.com/download/dotnet/10.0"
+}
+Push-Location $here
+try {
+    & dotnet publish ".\LiveRecorderTray.csproj" `
+        -c Release `
+        -r win-x64 `
+        --self-contained true `
+        -p:PublishSingleFile=true `
+        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:PublishTrimmed=false `
+        -p:DebugType=none `
+        -p:DebugSymbols=false `
+        -o $out
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+}
+finally {
+    Pop-Location
+}
 Write-Output "built $out\LiveRecorderTray.exe"

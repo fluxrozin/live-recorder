@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -111,6 +112,7 @@ sealed class TrayContext : ApplicationContext
     readonly Icon _iconStopped;
     readonly Icon _iconBusy;
     readonly TrayConfig _config;
+    static readonly HttpClient HealthClient = CreateHealthClient();
     bool _busy;
     bool _polling;
     bool _upPending;
@@ -200,10 +202,23 @@ sealed class TrayContext : ApplicationContext
         }
     }
 
+    static string ExePath()
+    {
+        string path = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(path)) throw new InvalidOperationException("exe path");
+        return path;
+    }
+
+    static string ExeDirectory()
+    {
+        string dir = Path.GetDirectoryName(ExePath());
+        if (string.IsNullOrEmpty(dir)) throw new InvalidOperationException("exe directory");
+        return dir;
+    }
+
     static TrayConfig LoadConfig()
     {
-        string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        string path = Path.Combine(dir, "tray.json");
+        string path = Path.Combine(ExeDirectory(), "tray.json");
         if (!File.Exists(path)) return null;
         string text = File.ReadAllText(path, Encoding.UTF8);
         string distro = JsonRead.String(text, "distro");
@@ -412,7 +427,10 @@ sealed class TrayContext : ApplicationContext
             {
                 try
                 {
-                    Process.Start("http://127.0.0.1:" + port.ToString() + "/");
+                    Process.Start(new ProcessStartInfo("http://127.0.0.1:" + port.ToString() + "/")
+                    {
+                        UseShellExecute = true,
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -512,13 +530,12 @@ sealed class TrayContext : ApplicationContext
     {
         if (string.IsNullOrEmpty(value)) return false;
         if (string.Equals(value, StartupCommand(), StringComparison.OrdinalIgnoreCase)) return true;
-        string path = Assembly.GetExecutingAssembly().Location;
-        return string.Equals(value.Trim().Trim('"'), path, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value.Trim().Trim('"'), ExePath(), StringComparison.OrdinalIgnoreCase);
     }
 
     static string StartupCommand()
     {
-        return "\"" + Assembly.GetExecutingAssembly().Location.Replace("\"", "") + "\"";
+        return "\"" + ExePath().Replace("\"", "") + "\"";
     }
 
     void Balloon(string title, string text)
@@ -593,18 +610,25 @@ sealed class TrayContext : ApplicationContext
         return list;
     }
 
+    static HttpClient CreateHealthClient()
+    {
+        var handler = new HttpClientHandler();
+        handler.UseProxy = false;
+        var client = new HttpClient(handler);
+        client.Timeout = TimeSpan.FromMilliseconds(3000);
+        return client;
+    }
+
     static HealthResult FetchHealth(int port)
     {
         var down = new HealthResult();
         try
         {
-            var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port.ToString() + "/healthz");
-            req.Timeout = 3000;
-            req.ReadWriteTimeout = 3000;
-            req.Method = "GET";
-            req.Proxy = null;
-            using (var res = (HttpWebResponse)req.GetResponse())
-            using (var reader = new StreamReader(res.GetResponseStream(), Encoding.UTF8))
+            using (var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                "http://127.0.0.1:" + port.ToString() + "/healthz"))
+            using (var res = HealthClient.Send(request))
+            using (var reader = new StreamReader(res.Content.ReadAsStream(), Encoding.UTF8))
             {
                 string body = reader.ReadToEnd();
                 if (res.StatusCode != HttpStatusCode.OK) return down;
@@ -837,6 +861,7 @@ static class Program
             created = true;
         }
         if (!created) return;
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         try
