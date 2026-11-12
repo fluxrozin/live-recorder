@@ -1,8 +1,10 @@
 """Web 画面の結合テスト（PostgreSQL 必須）。実際のルートを通して画面と操作を確認する。"""
 
 import asyncio
+import io
 import os
 import re
+import zipfile
 from datetime import timedelta
 
 import pytest
@@ -71,16 +73,15 @@ async def _seed(settings) -> dict:
         stored = settings.recordings_dir / "tiktok" / "live_user" / "seg1.mp4"
         stored.parent.mkdir(parents=True)
         stored.write_bytes(b"0" * 1024)
-        session.add(
-            RecordingSegment(
-                recording_job_id=job.id,
-                segment_number=1,
-                started_at=now,
-                finished_at=now,
-                file_path="tiktok/live_user/seg1.mp4",
-                file_size=1024,
-            )
+        first = RecordingSegment(
+            recording_job_id=job.id,
+            segment_number=1,
+            started_at=now,
+            finished_at=now,
+            file_path="tiktok/live_user/seg1.mp4",
+            file_size=1024,
         )
+        session.add(first)
         session.add(
             RecordingSegment(
                 recording_job_id=job.id,
@@ -89,6 +90,7 @@ async def _seed(settings) -> dict:
                 file_path="tiktok/live_user/missing.mp4",
             )
         )
+        await session.flush()
         session.add(
             Comment(
                 stream_session_id=stream.id,
@@ -110,7 +112,7 @@ async def _seed(settings) -> dict:
             )
         )
         await session.commit()
-        ids = {"streamer": live.id, "session": stream.id}
+        ids = {"streamer": live.id, "session": stream.id, "segment": first.id}
     await db.dispose()
     return ids
 
@@ -221,9 +223,21 @@ def test_pages_render_with_real_data(client):
     assert client.get("/comments/export?format=srt").status_code == 400
     exported = client.get(f"/comments/export?session_id={session_id}&format=srt")
     assert exported.status_code == 200
-    assert exported.headers["content-type"].startswith("application/x-subrip")
-    assert "-->" in exported.text
-    assert exported.text.index("古いコメント") < exported.text.index("<script>")
+    # セグメントが複数ある配信は、セグメントごとの SRT を ZIP で返す。
+    assert exported.headers["content-type"].startswith("application/zip")
+    assert "comments.zip" in exported.headers.get("content-disposition", "")
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+        assert any(name.endswith("_Comments.srt") for name in names)
+        bodies = [archive.read(name).decode("utf-8") for name in names]
+    joined = "\n".join(bodies)
+    assert "-->" in joined
+    assert joined.index("古いコメント") < joined.index("<script>")
+    segment_id = client.ids["segment"]
+    single = client.get(f"/comments/export?session_id={session_id}&segment_id={segment_id}&format=srt")
+    assert single.status_code == 200
+    assert single.headers["content-type"].startswith("application/x-subrip")
+    assert "古いコメント" in single.text
     assert client.get("/comments/export?format=jsonl").status_code == 400
 
 
@@ -303,7 +317,7 @@ def test_streamer_order_switches_between_name_and_custom(client):
         assert created.status_code == 303
 
     def names(html: str) -> list[str]:
-        return re.findall(r'class="c-streamer__name[^"]*">([^<]+)', html)
+        return re.findall(r'class="c-streamer__name[^"]*"[^>]*>([^<]+)', html)
 
     listing = client.get("/streamers").text
     assert names(listing) == ["あいう", "かきく", "配信中の人"]
