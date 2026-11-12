@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ async def test_process_stop_does_not_use_a_shell():
         stop.set()
 
     stopper = asyncio.create_task(stop_soon())
-    result = await run_process(["python", "-c", "import time; time.sleep(30)"], stop, kill_after=2)
+    result = await run_process([sys.executable, "-c", "import time; time.sleep(30)"], stop, kill_after=2)
     await stopper
     assert result.stopped
     assert result.returncode is not None
@@ -218,6 +219,40 @@ async def test_finalize_adopts_only_a_newer_mp4_from_this_segment(tmp_path: Path
     assert final.path == current
     assert current.read_bytes() == b"R" * 2048
     assert final.obsolete == source
+    assert source.exists()
+
+
+async def test_finalize_does_not_adopt_a_shorter_recording(tmp_path: Path):
+    source = tmp_path / "seg.ts"
+    other = tmp_path / "seg.mp4"
+    source.write_bytes(b"\x00" * 2048)
+    other.write_bytes(b"S" * 2048)
+    os.utime(source, (100, 100))
+    os.utime(other, (200, 200))
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_text(
+        "#!/bin/sh\n"
+        "for target do :; done\n"
+        "dur=4.0\n"
+        "case \"$target\" in *.mp4) dur=2.0 ;; esac\n"
+        "printf '%s\\n' "
+        "'{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\"}],"
+        "\"format\":{\"format_name\":\"mpegts\",\"duration\":\"'\"$dur\"'\"}}'\n",
+        encoding="utf-8",
+    )
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.write_text(
+        "#!/bin/sh\n"
+        "for target do :; done\n"
+        "python3 -c \"import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'F'*2048)\" \"$target\"\n",
+        encoding="utf-8",
+    )
+    ffprobe.chmod(0o755)
+    ffmpeg.chmod(0o755)
+    final = await finalize_recording(str(ffmpeg), str(ffprobe), source)
+    assert final.path != other
+    assert final.path.name == "seg_2.mp4"
+    assert other.read_bytes() == b"S" * 2048
     assert source.exists()
 
 

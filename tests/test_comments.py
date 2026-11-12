@@ -176,6 +176,14 @@ def test_comment_export_uses_recording_stem():
     assert second.endswith("_seg02_Comments.srt")
     assert first != second
     assert len(first.encode("utf-8")) <= 255
+    crowded = ("あ" * 80) + "_seg01_2.ts"
+    other = ("あ" * 80) + "_seg01_3.ts"
+    first_crowded = comment_export_name(crowded)
+    second_crowded = comment_export_name(other)
+    assert first_crowded.endswith("_seg01_2_Comments.srt")
+    assert second_crowded.endswith("_seg01_3_Comments.srt")
+    assert first_crowded != second_crowded
+    assert len(first_crowded.encode("utf-8")) <= 255
     relatives = comment_sidecar_relatives("tiktok/user/day/clip.ts")
     assert relatives[0] == "tiktok/user/day/clip_Comments.srt"
     assert relatives[1:] == [

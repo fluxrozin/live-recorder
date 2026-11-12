@@ -334,6 +334,7 @@ class Supervisor:
         start_comments = False
         session_id: int | None = None
         idle_recordings: list[tuple[int, RecordingStatus, str, bool]] = []
+        signals: list[asyncio.Event] = []
         async with self.db.session() as session:
             repo = Repository(session)
             streamer = await repo.get_streamer(streamer_id)
@@ -346,19 +347,21 @@ class Supervisor:
                 streamer.last_live_at = utcnow()
             open_session = await repo.open_session(streamer_id)
             if plan.session in {"end", "replace"} and open_session is not None:
-                idle_recordings.extend(
-                    await self._end_session(
-                        repo,
-                        open_session.id,
-                        cancel=plan.live_status == LiveStatus.DISABLED,
-                    )
+                idle, extra = await self._end_session(
+                    repo,
+                    open_session.id,
+                    cancel=plan.live_status == LiveStatus.DISABLED,
                 )
+                idle_recordings.extend(idle)
+                signals.extend(extra)
                 open_session = None if plan.session == "replace" else await repo.get_session(open_session.id)
             elif open_session is not None and open_session.status == "LIVE":
                 if plan.stop_recording:
-                    idle_recordings.extend(await self._halt_recording(repo, open_session.id))
+                    idle, extra = await self._halt_recording(repo, open_session.id)
+                    idle_recordings.extend(idle)
+                    signals.extend(extra)
                 if plan.stop_comments:
-                    await self._halt_comments(repo, open_session.id)
+                    signals.extend(await self._halt_comments(repo, open_session.id))
             if plan.session in {"open", "replace"} and observation.status == LiveStatus.LIVE:
                 created = await repo.create_session(
                     streamer_id=streamer_id,
@@ -397,6 +400,8 @@ class Supervisor:
                 session_id = open_session.id
                 start_recording = plan.start_recording
                 start_comments = plan.start_comments
+        for event in signals:
+            event.set()
         for job_id, target, reason, from_media in idle_recordings:
             await close_recording_if_idle(
                 self.settings,
@@ -411,10 +416,12 @@ class Supervisor:
         if session_id and start_comments:
             await self._ensure_comments(session_id)
 
-    async def _end_session(self, repo: Repository, session_id: int, *, cancel: bool) -> list[tuple[int, RecordingStatus, str, bool]]:
+    async def _end_session(
+        self, repo: Repository, session_id: int, *, cancel: bool
+    ) -> tuple[list[tuple[int, RecordingStatus, str, bool]], list[asyncio.Event]]:
         stream = await repo.get_session(session_id)
         if stream is None or stream.status == "ENDED":
-            return []
+            return [], []
         rec = await repo.active_recording(session_id)
         com = await repo.active_comments(session_id)
         stream.status = "ENDED"
@@ -429,10 +436,11 @@ class Supervisor:
             session_id=session_id,
         )
         idle: list[tuple[int, RecordingStatus, str, bool]] = []
+        signals: list[asyncio.Event] = []
         if rec is not None:
             event = self.events.get(("rec", rec.id))
             if event is not None:
-                event.set()
+                signals.append(event)
             elif rec.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
                 if cancel:
                     idle.append((rec.id, RecordingStatus.CANCELLED, "monitoring disabled", False))
@@ -441,36 +449,37 @@ class Supervisor:
         if com is not None:
             event = self.events.get(("com", com.id))
             if event is not None:
-                event.set()
+                signals.append(event)
             elif com.status not in {"COMPLETED", "PARTIAL", "FAILED", "DISABLED"}:
                 await self._finish_idle_comments(repo, session_id, com)
         ended = utcnow()
         await repo.close_open_gaps(session_id, "recording", ended)
         await repo.close_open_gaps(session_id, "comments", ended)
-        return idle
+        return idle, signals
 
-    async def _halt_recording(self, repo: Repository, session_id: int) -> list[tuple[int, RecordingStatus, str, bool]]:
+    async def _halt_recording(
+        self, repo: Repository, session_id: int
+    ) -> tuple[list[tuple[int, RecordingStatus, str, bool]], list[asyncio.Event]]:
         rec = await repo.active_recording(session_id)
         if rec is None or rec.status in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
-            return []
+            return [], []
         rec.cancel_requested = True
         event = self.events.get(("rec", rec.id))
         if event is not None:
-            event.set()
-            return []
-        return [(rec.id, RecordingStatus.CANCELLED, "recording disabled", False)]
+            return [], [event]
+        return [(rec.id, RecordingStatus.CANCELLED, "recording disabled", False)], []
 
-    async def _halt_comments(self, repo: Repository, session_id: int) -> None:
+    async def _halt_comments(self, repo: Repository, session_id: int) -> list[asyncio.Event]:
         com = await repo.active_comments(session_id)
         if com is None or com.status in {"COMPLETED", "PARTIAL", "FAILED", "DISABLED"}:
-            return
+            return []
         com.cancel_requested = True
         event = self.events.get(("com", com.id))
         if event is not None:
-            event.set()
-            return
+            return [event]
         await self._finish_idle_comments(repo, session_id, com)
         await repo.close_open_gaps(session_id, "comments", utcnow())
+        return []
 
     async def _finish_idle_comments(self, repo: Repository, session_id: int, com) -> None:
         gaps = comment_gaps_for_job(await repo.gaps_for_session(session_id), com)

@@ -776,7 +776,11 @@ class Repository:
             stmt = stmt.where(Comment.platform_user_id == user_id)
         if nickname:
             stmt = stmt.where(Comment.nickname.ilike(self._like(nickname)))
-        stmt = stmt.order_by(anchor.asc(), Comment.id.asc()).limit(limit)
+        stmt = (
+            stmt.options(selectinload(Comment.session).selectinload(StreamSession.streamer))
+            .order_by(anchor.asc(), Comment.id.asc())
+            .limit(limit)
+        )
         return list(await self.session.scalars(stmt))
 
     async def export_comments_for_segments(

@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from live_recorder.comments.ass import refresh_combined_ass
-from live_recorder.config import load_settings
+from live_recorder.config import Settings, load_settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import load_runtime
 from live_recorder.db.session import Database
@@ -116,6 +116,7 @@ async def _run(stop: asyncio.Event) -> None:
                     continue
                 continue
             segment_id, relative, model_name, language, previous_srt = claimed
+            video = None
             try:
                 video = resolve_stored(settings.recordings_dir, relative)
                 if not video.is_file():
@@ -131,26 +132,24 @@ async def _run(stop: asyncio.Event) -> None:
                         current,
                         video,
                         language=language,
+                        ffprobe=settings.ffprobe_path,
                     ),
                 )
             except Exception as exc:
                 status, produced, error = "failed", None, clip_error(exc)
-            if produced is not None and not await _segment_still_recorded(db, segment_id):
-                produced.unlink(missing_ok=True)
-                status, produced, error = "failed", None, "録画は削除されました"
-                previous_srt = None
-            produced_relative = None
-            if produced is not None:
-                produced_relative = relative_to_root(settings.recordings_dir, produced)
-            srt_relative = speech_result_path(status=status, produced=produced_relative, previous=previous_srt)
-            await _finish(db, segment_id, status, srt_relative, error, keep_path=False)
-            if status == "completed":
-                try:
-                    await asyncio.to_thread(
-                        refresh_combined_ass, video, ffprobe=settings.ffprobe_path
-                    )
-                except Exception:
-                    log.exception("combined ass failed for segment %s", segment_id)
+            if video is None:
+                await _finish(db, segment_id, status, None, error, keep_path=False)
+            else:
+                status, error = await _publish_speech(
+                    db,
+                    settings,
+                    segment_id,
+                    video,
+                    status,
+                    produced,
+                    error,
+                    previous_srt,
+                )
             if status == "failed":
                 log.warning("speech segment %s failed: %s", segment_id, error)
             else:
@@ -162,10 +161,39 @@ async def _run(stop: asyncio.Event) -> None:
         await db.dispose()
 
 
-async def _segment_still_recorded(db: Database, segment_id: int) -> bool:
+async def _publish_speech(
+    db: Database,
+    settings: Settings,
+    segment_id: int,
+    video: Path,
+    status: str,
+    produced: Path | None,
+    error: str | None,
+    previous_srt: str | None,
+) -> tuple[str, str | None]:
+    """削除と同時に字幕を書き戻さないよう、配信行をロックしてから公開する。"""
     async with db.session() as session:
-        segment = await Repository(session).get_segment(segment_id)
-        return segment is not None and not segment.file_removed and segment.finished_at is not None
+        repo = Repository(session)
+        found = await repo.segment_with_session(segment_id)
+        if found is not None:
+            await repo.lock_session(found[1])
+            found = await repo.segment_with_session(segment_id)
+        segment = found[0] if found is not None else None
+        gone = segment is None or segment.file_removed or segment.finished_at is None or not video.is_file()
+        if produced is not None and gone:
+            produced.unlink(missing_ok=True)
+            video.with_suffix(".ass").unlink(missing_ok=True)
+            status, produced, error, previous_srt = "failed", None, "録画は削除されました", None
+        produced_relative = relative_to_root(settings.recordings_dir, produced) if produced is not None else None
+        srt_relative = speech_result_path(status=status, produced=produced_relative, previous=previous_srt)
+        await repo.finish_speech(segment_id, status=status, srt_path=srt_relative, error=error, keep_path=False)
+        if status == "completed" and segment is not None and not segment.file_removed and video.is_file():
+            try:
+                await asyncio.to_thread(refresh_combined_ass, video, ffprobe=settings.ffprobe_path)
+            except Exception:
+                log.exception("combined ass failed for segment %s", segment_id)
+        await session.commit()
+    return status, error
 
 
 def main() -> None:

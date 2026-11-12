@@ -398,6 +398,82 @@ def test_extract_audio_keeps_the_video_timeline(tmp_path):
     assert 2.8 < _wav_seconds(lead_wav) < 3.4
     assert 2.8 < _wav_seconds(late_wav) < 3.4
     assert 6.5 < _wav_seconds(gap_wav) < 7.2
+    jump_a = tmp_path / "jump_a.ts"
+    jump_b = tmp_path / "jump_b.ts"
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-f",
+        "mpegts",
+        str(jump_a),
+    )
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=880:duration=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-f",
+        "mpegts",
+        "-output_ts_offset",
+        "12.7",
+        str(jump_b),
+    )
+    jump = tmp_path / "jump.ts"
+    jump.write_bytes(jump_a.read_bytes() + jump_b.read_bytes())
+    jump_wav = tmp_path / "jump.wav"
+    extract_audio("ffmpeg", jump, jump_wav)
+    assert 12.0 < _wav_seconds(jump_wav) < 16.0
+    mkv = tmp_path / "late.mkv"
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=6",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-filter_complex",
+        "[1:a]asetpts=PTS+5/TB[a]",
+        "-map",
+        "0:v",
+        "-map",
+        "[a]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-t",
+        "6",
+        str(mkv),
+    )
+    mkv_wav = tmp_path / "late-mkv.wav"
+    extract_audio("ffmpeg", mkv, mkv_wav)
+    assert 5.5 < _wav_seconds(mkv_wav) < 6.5
 
 
 def test_speech_settings_accept_known_model_and_language():

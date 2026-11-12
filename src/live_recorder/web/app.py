@@ -712,7 +712,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             segment, session_id = found
             if segment.file_removed:
                 raise HTTPException(404)
-            relative = segment.file_path
             windows = [_window(item) for item in await repo.segments_for_session(session_id)]
             stored = await repo.export_comments_for_segments(session_id, windows, only_id=segment_id)
             rows: list[dict[str, object]] = []
@@ -731,29 +730,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     for comment in grouped
                 ]
-        try:
-            video = resolve_stored(request.app.state.settings.recordings_dir, relative)
-        except PathEscape as exc:
-            raise HTTPException(404) from exc
-        if not video.is_file():
-            raise HTTPException(404)
-        comment_path = video.with_name(comment_export_name(video.name))
-        if rows:
-            payload, _media = encode_export(rows)
-            comment_path.write_bytes(payload)
-        else:
-            comment_path.unlink(missing_ok=True)
-        try:
-            written = await asyncio.to_thread(
-                refresh_combined_ass,
-                video,
-                ffprobe=request.app.state.settings.ffprobe_path,
-            )
-        except Exception as exc:
-            raise HTTPException(404) from exc
-        if written is None or not written.is_file():
-            raise HTTPException(404)
-        body = written.read_bytes()
+            await repo.lock_session(session_id)
+            current = await repo.get_segment(segment_id)
+            if current is None or current.file_removed:
+                raise HTTPException(404)
+            relative = current.file_path
+            try:
+                video = resolve_stored(request.app.state.settings.recordings_dir, relative)
+            except PathEscape as exc:
+                raise HTTPException(404) from exc
+            if not video.is_file():
+                raise HTTPException(404)
+            comment_path = video.with_name(comment_export_name(video.name))
+            if rows:
+                payload, _media = encode_export(rows)
+                comment_path.write_bytes(payload)
+            else:
+                comment_path.unlink(missing_ok=True)
+            try:
+                written = await asyncio.to_thread(
+                    refresh_combined_ass,
+                    video,
+                    ffprobe=request.app.state.settings.ffprobe_path,
+                )
+            except Exception as exc:
+                raise HTTPException(404) from exc
+            if written is None or not written.is_file():
+                raise HTTPException(404)
+            body = written.read_bytes()
+            await session.commit()
         return Response(
             content=body,
             media_type="text/plain; charset=utf-8",

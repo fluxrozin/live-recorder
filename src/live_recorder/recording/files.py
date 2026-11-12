@@ -19,12 +19,13 @@ def safe_token(value: str, *, fallback: str = "unknown") -> str:
     return cleaned
 
 
-_SEGMENT_TAIL = re.compile(r"(_seg\d+)$")
+_SEGMENT_TAIL = re.compile(r"(_seg\d+(?:_\d+)?)$")
+_NAME_MAX = 255
 
 
 def fit_export_name(stem: str, suffix: str, *, fallback: str) -> str:
     """255 バイトに収める。セグメント番号は末尾に残す。"""
-    room = 255 - len(suffix.encode("utf-8"))
+    room = _NAME_MAX - len(suffix.encode("utf-8"))
     raw = stem.encode("utf-8")
     if len(raw) <= room:
         return f"{stem}{suffix}"
@@ -95,18 +96,71 @@ def build_segment_path(
     while _stem_taken(candidate):
         candidate = directory / f"{stem}_{counter}{suffix}"
         counter += 1
+        if counter > 1000 or not _within_name_limit(candidate):
+            raise OSError(f"空きの録画名がありません: {stem}{suffix}")
     return assert_under(root, candidate)
 
 
+_UNTITLED_FILE = re.compile(
+    r"^(?P<head>.+_\d{8}_\d{6}_)無題_seg(?P<num>\d+)(?:_\d+)?(?P<suffix>\.[A-Za-z0-9]+)$"
+)
+
+
+def untitled_replacement(path: Path, title: str | None) -> Path | None:
+    """無題で確定したファイル名を、配信タイトルの名前に組み直す。対象外なら None。"""
+    if not title or not title.strip():
+        return None
+    match = _UNTITLED_FILE.match(path.name)
+    if match is None:
+        return None
+    head = match.group("head")
+    suffix = match.group("suffix")
+    segment = f"seg{int(match.group('num')):02d}"
+    reserved = len(suffix.encode("utf-8")) + len("_99") + len(f"_{segment}".encode("utf-8"))
+    room = 255 - reserved - len(head.encode("utf-8"))
+    if room < 1:
+        return None
+    label = file_label(title, fallback="無題", max_bytes=room)
+    if label == "無題":
+        return None
+    stem = f"{head}{label}_{segment}"
+    candidate = path.with_name(f"{stem}{suffix}")
+    counter = 2
+    while candidate != path and _stem_taken(candidate):
+        candidate = path.with_name(f"{stem}_{counter}{suffix}")
+        if len(candidate.name.encode("utf-8")) > 255 or counter > 1000:
+            return None
+        counter += 1
+    if candidate == path:
+        return None
+    return candidate
+
+
+def _within_name_limit(path: Path) -> bool:
+    return len(path.name.encode("utf-8")) <= _NAME_MAX
+
+
+def _present(path: Path) -> bool:
+    """名前がファイルシステムに収まるときだけ存在を調べる。長すぎる名前は無いものとして扱う。"""
+    if not _within_name_limit(path):
+        return False
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _stem_taken(candidate: Path) -> bool:
-    """同じ幹の TS か、確定済みの MP4 がある名前は使わない。"""
-    if candidate.exists():
+    """同じ幹の TS、確定済みの MP4、詰め直し途中のファイルがある名前は使わない。"""
+    if not _within_name_limit(candidate):
         return True
-    mp4 = candidate.with_suffix(".mp4")
-    if mp4 != candidate and mp4.exists():
+    if _present(candidate):
         return True
-    partial = candidate.with_suffix(".mp4.partial")
-    return partial != candidate and partial.exists()
+    for suffix in (".ts", ".mp4", ".mp4.partial"):
+        other = candidate.with_suffix(suffix)
+        if other != candidate and _present(other):
+            return True
+    return False
 
 
 def resolve_stored(root: Path, relative: str) -> Path:

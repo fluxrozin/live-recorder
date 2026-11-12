@@ -55,6 +55,13 @@ from live_recorder.recording.policy import (
     recording_result,
 )
 from live_recorder.recording.process import run_process
+from live_recorder.recording.retitle import (
+    StagedRetitle,
+    publish_retitle,
+    rewrite_stored_path,
+    rollback_retitle,
+    stage_retitle,
+)
 from live_recorder.speech.queue import assign_speech_queue
 from live_recorder.timeutil import utcnow
 
@@ -86,13 +93,19 @@ def comment_job_result(
 
 
 def comment_gaps_for_job(gaps, job) -> list:
-    """この収集が始まった後のコメント欠損だけを見る。"""
+    """この収集の期間と重なるコメント欠損を見る。開始がジョブより前でも、終わりが後なら対象にする。"""
     started = getattr(job, "started_at", None)
-    return [
-        gap
-        for gap in gaps
-        if gap.job_type == "comments" and (started is None or gap.started_at >= started)
-    ]
+    chosen = []
+    for gap in gaps:
+        if getattr(gap, "job_type", None) != "comments":
+            continue
+        if started is None:
+            chosen.append(gap)
+            continue
+        ended = getattr(gap, "ended_at", None)
+        if ended is None or ended >= started:
+            chosen.append(gap)
+    return chosen
 
 
 def next_comment_wait(attempt: int, error: str | None, block_remaining: float) -> float:
@@ -228,6 +241,7 @@ async def _watch_stop(db: Database, stop: asyncio.Event, job_id: int, session_id
 async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingClient, job_id: int, stop: asyncio.Event) -> None:
     watcher = asyncio.create_task(_watch_stop(db, stop, job_id, await _session_id(db, job_id)))
     saw_failure = ""
+    open_retitles: list[StagedRetitle] = []
     try:
         async with db.session() as session:
             repo = Repository(session)
@@ -287,7 +301,11 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     os.environ["SIGN_API_KEY"] = settings.sign_api_key
                 info = await lookup_room(user_id)
                 if info is not None:
-                    await _remember_room(db, session_id, None, info)
+                    matched = await _remember_room(db, session_id, None, info)
+                    if not matched:
+                        saw_failure = "room_changed"
+                        last_kind = INTERRUPTED
+                        break
                 continue
             if engine == "official-hls" and platform == "twitcasting":
                 playlist, early = await _resolve_official_hls(tc, user_id, quality)
@@ -369,6 +387,13 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             async with db.session() as session:
                 repo = Repository(session)
                 job = await repo.get_recording_job(job_id)
+                current = await repo.get_session(session_id)
+                if opened and not drop_segment and final_path is not None and final_path.is_file():
+                    staged = stage_retitle(final_path, current.title if current else None)
+                    if staged is not None:
+                        await _point_exports_at(repo, session_id, staged)
+                        final_path = staged.dest
+                        open_retitles.append(staged)
                 if opened and not drop_segment and final_path is not None:
                     segment = await session.get(
                         __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
@@ -400,6 +425,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     elif size >= 64 * 1024:
                         await repo.mark_engine(engine, ok=True)
                 await session.commit()
+            _release_retitles(open_retitles, publish=True)
             if drop_segment and path is not None:
                 path.unlink(missing_ok=True)
             discard_obsolete(obsolete)
@@ -448,6 +474,12 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             stream = await repo.get_session(session_id)
             if job is None:
                 return
+            if stream is not None and stream.title:
+                open_retitles.extend(
+                    await _retitle_finished_segments(
+                        repo, settings.recordings_dir, session_id, job_id, stream.title
+                    )
+                )
             if leave_recording_open(
                 stopped=stop.is_set(),
                 cancel_requested=job.cancel_requested,
@@ -456,6 +488,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                 if job.status in {RecordingStatus.STARTING.value, RecordingStatus.RECORDING.value}:
                     repo.move_recording(job, RecordingStatus.RECONNECTING)
                 await session.commit()
+                _release_retitles(open_retitles, publish=True)
                 return
             has_media = await repo.any_valid_segment(job_id)
             gaps = await repo.gaps_for_session(session_id)
@@ -480,7 +513,9 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             event = "recording_finished" if target != RecordingStatus.FAILED else "recording_failed"
             await repo.add_event(event, f"録画を {target.value} で終了", severity=severity, session_id=session_id)
             await session.commit()
+            _release_retitles(open_retitles, publish=True)
     except Exception:
+        _release_retitles(open_retitles, publish=False)
         log.exception("recording job %s crashed", job_id)
         async with db.session() as session:
             repo = Repository(session)
@@ -605,20 +640,37 @@ async def _collect_tiktok(
     from TikTokLive.events import CommentEvent, ConnectEvent
 
     client = TikTokLiveClient(unique_id=user_id)
+    gate = asyncio.Lock()
+    room_open = False
+    held: list[CommentDraft] = []
 
     @client.on(ConnectEvent)
     async def on_connect(event: object) -> None:
+        nonlocal room_open
         room_id = getattr(event, "room_id", None)
         info = getattr(client, "room_info", None)
         matched = await on_room(str(room_id) if room_id else None, info if isinstance(info, dict) else None)
-        if matched is False:
-            stop.set()
+        async with gate:
+            if matched is False:
+                held.clear()
+                stop.set()
+                return
+            room_open = True
+            pending = held
+            held.clear()
+        for draft in pending:
+            await sink.add(draft)
 
     @client.on(CommentEvent)
     async def on_comment(event: object) -> None:
         draft = comment_from_event(event)
-        if draft is not None:
-            await sink.add(draft)
+        if draft is None:
+            return
+        async with gate:
+            if not room_open:
+                held.append(draft)
+                return
+        await sink.add(draft)
 
     while not stop.is_set():
         observation = await checks.check(user_id)
@@ -702,7 +754,7 @@ async def _collect_twitcasting(
             for item in drafts
             if item.platform_comment_id and item.platform_comment_id.isdigit()
         ]
-        if numeric:
+        if numeric and not truncated:
             last_id = str(max(numeric))
         for draft in drafts:
             await sink.add(draft)
@@ -939,6 +991,42 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
         )
 
 
+def _release_retitles(staged: list[StagedRetitle], *, publish: bool) -> None:
+    action = publish_retitle if publish else rollback_retitle
+    for item in staged:
+        action(item)
+    staged.clear()
+
+
+async def _point_exports_at(repo: Repository, session_id: int, staged: StagedRetitle) -> None:
+    for comment_job in await repo.comment_jobs_for_session(session_id):
+        comment_job.export_path = rewrite_stored_path(staged, comment_job.export_path)
+
+
+async def _retitle_finished_segments(
+    repo: Repository, root: Path, session_id: int, job_id: int, title: str
+) -> list[StagedRetitle]:
+    """閉じたセグメントの「無題」を配信タイトルへ付け直す。文字起こし中のファイルは動かさない。"""
+    staged_all: list[StagedRetitle] = []
+    for segment in await repo.segments_for_job(job_id):
+        if segment.file_removed or segment.speech_status == "running" or segment.finished_at is None:
+            continue
+        try:
+            path = resolve_stored(root, segment.file_path)
+        except ValueError:
+            continue
+        staged = stage_retitle(path, title)
+        if staged is None:
+            continue
+        if segment.speech_status == "pending":
+            staged.release_sources = False
+        segment.file_path = rewrite_stored_path(staged, segment.file_path) or segment.file_path
+        segment.speech_srt_path = rewrite_stored_path(staged, segment.speech_srt_path)
+        await _point_exports_at(repo, session_id, staged)
+        staged_all.append(staged)
+    return staged_all
+
+
 async def close_recording_if_idle(
     settings: Settings,
     db: Database,
@@ -950,54 +1038,73 @@ async def close_recording_if_idle(
     from_media: bool = False,
 ) -> None:
     obsolete: list[Path] = []
-    async with db.session() as session:
-        repo = Repository(session)
-        job = await repo.get_recording_job(job_id)
-        if job is None:
-            return
-        speech_enabled = (await load_runtime(session)).speech_subtitles_enabled
-        for segment in await repo.segments_for_job(job_id):
-            if segment.finished_at is not None or segment.file_removed:
-                continue
-            has_media = False
-            try:
-                path = resolve_stored(settings.recordings_dir, segment.file_path)
-            except ValueError:
-                segment.finished_at = utcnow()
-                segment.validation_status = "invalid"
-                assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
-                continue
-            if path.is_file() and path.stat().st_size > 0:
+    open_retitles: list[StagedRetitle] = []
+    try:
+        async with db.session() as session:
+            repo = Repository(session)
+            job = await repo.get_recording_job(job_id)
+            if job is None:
+                return
+            speech_enabled = (await load_runtime(session)).speech_subtitles_enabled
+            stream = await repo.get_session(job.stream_session_id)
+            title = stream.title if stream else None
+            for segment in await repo.segments_for_job(job_id):
+                if segment.finished_at is not None or segment.file_removed:
+                    continue
+                has_media = False
                 try:
-                    final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
-                except Exception:
-                    log.exception("finalize failed for %s", segment.file_path)
+                    path = resolve_stored(settings.recordings_dir, segment.file_path)
+                except ValueError:
                     segment.finished_at = utcnow()
                     segment.validation_status = "invalid"
                     assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
                     continue
-                segment.file_path = relative_to_root(settings.recordings_dir, final.path)
-                segment.file_size = final.size
-                segment.duration_ms = final.duration_ms
-                segment.container_format = final.container
-                segment.validation_status = final.validation
-                has_media = final.has_media
-                if final.obsolete is not None:
-                    obsolete.append(final.obsolete)
-            else:
-                segment.validation_status = "invalid"
-                segment.file_size = 0
-            segment.finished_at = utcnow()
-            assign_speech_queue(segment, enabled=speech_enabled, has_media=has_media)
-        if finish and job.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
-            chosen = target
-            if from_media:
-                has_media = await repo.any_valid_segment(job_id)
-                chosen = RecordingStatus.PARTIAL if has_media else RecordingStatus.FAILED
-            if reason is None:
-                reason = None if chosen == RecordingStatus.COMPLETED else "worker restarted"
-            repo.finish_recording(job, chosen, reason)
-            await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
-        await session.commit()
+                if path.is_file() and path.stat().st_size > 0:
+                    try:
+                        final = await finalize_recording(settings.ffmpeg_path, settings.ffprobe_path, path)
+                    except Exception:
+                        log.exception("finalize failed for %s", segment.file_path)
+                        segment.finished_at = utcnow()
+                        segment.validation_status = "invalid"
+                        assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
+                        continue
+                    segment.file_path = relative_to_root(settings.recordings_dir, final.path)
+                    staged = stage_retitle(final.path, title)
+                    if staged is not None:
+                        await _point_exports_at(repo, job.stream_session_id, staged)
+                        segment.file_path = relative_to_root(settings.recordings_dir, staged.dest)
+                        open_retitles.append(staged)
+                    segment.file_size = final.size
+                    segment.duration_ms = final.duration_ms
+                    segment.container_format = final.container
+                    segment.validation_status = final.validation
+                    has_media = final.has_media
+                    if final.obsolete is not None:
+                        obsolete.append(final.obsolete)
+                else:
+                    segment.validation_status = "invalid"
+                    segment.file_size = 0
+                segment.finished_at = utcnow()
+                assign_speech_queue(segment, enabled=speech_enabled, has_media=has_media)
+            if title:
+                open_retitles.extend(
+                    await _retitle_finished_segments(
+                        repo, settings.recordings_dir, job.stream_session_id, job_id, title
+                    )
+                )
+            if finish and job.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
+                chosen = target
+                if from_media:
+                    has_media = await repo.any_valid_segment(job_id)
+                    chosen = RecordingStatus.PARTIAL if has_media else RecordingStatus.FAILED
+                if reason is None:
+                    reason = None if chosen == RecordingStatus.COMPLETED else "worker restarted"
+                repo.finish_recording(job, chosen, reason)
+                await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
+            await session.commit()
+    except Exception:
+        _release_retitles(open_retitles, publish=False)
+        raise
+    _release_retitles(open_retitles, publish=True)
     for path in obsolete:
         discard_obsolete(path)

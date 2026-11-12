@@ -53,10 +53,17 @@ def interpret_speech(action):
     return "completed", produced, None
 
 
-def transcribe_video(ffmpeg: str, model, video: Path, *, language: str) -> Path | None:
+def transcribe_video(
+    ffmpeg: str,
+    model,
+    video: Path,
+    *,
+    language: str,
+    ffprobe: str | None = None,
+) -> Path | None:
     with tempfile.TemporaryDirectory() as temporary:
         wav = Path(temporary) / "audio.wav"
-        extract_audio(ffmpeg, video, wav)
+        extract_audio(ffmpeg, video, wav, ffprobe=ffprobe)
         cues = transcribe(model, wav, language=language)
     target = speech_srt_path(video)
     if write_speech_srt(cues, target) == 0:

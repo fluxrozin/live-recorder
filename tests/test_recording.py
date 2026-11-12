@@ -88,6 +88,106 @@ def test_filename_uses_platform_user_time_and_title(tmp_path: Path):
     assert occupied.with_suffix(".mp4").read_bytes() == b"old"
 
 
+def test_closed_untitled_recording_takes_the_session_title(tmp_path: Path):
+    from live_recorder.recording.retitle import (
+        retitle_closed_file,
+        rewrite_stored_path,
+        rollback_retitle,
+        stage_retitle,
+    )
+
+    video = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01.mp4"
+    video.write_bytes(b"video")
+    speech = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01_Speech.srt"
+    speech.write_text("speech", encoding="utf-8")
+    comments = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01_Comments.srt"
+    comments.write_text("comments", encoding="utf-8")
+    ass = video.with_suffix(".ass")
+    ass.write_text("ass", encoding="utf-8")
+    assert stage_retitle(video, None) is None
+    staged = stage_retitle(video, "ゲスト出勤")
+    assert staged is not None
+    renamed = staged.dest
+    assert renamed.name == "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01.mp4"
+    assert video.exists() and video.samefile(renamed)
+    relative = "tiktok/9ri_pi/2026-11-12/" + video.name
+    assert rewrite_stored_path(staged, relative) == "tiktok/9ri_pi/2026-11-12/" + renamed.name
+    assert rewrite_stored_path(staged, relative.removesuffix(".mp4") + "_Comments.srt").endswith(
+        "_ゲスト出勤_seg01_Comments.srt"
+    )
+    rollback_retitle(staged)
+    assert video.is_file() and not renamed.exists()
+    assert speech.is_file()
+    renamed = retitle_closed_file(video, "ゲスト出勤")
+    assert renamed.name == "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01.mp4"
+    assert renamed.read_bytes() == b"video"
+    assert not video.exists()
+    assert (tmp_path / "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01_Speech.srt").read_text(encoding="utf-8") == "speech"
+    assert (tmp_path / "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01_Comments.srt").read_text(encoding="utf-8") == "comments"
+    assert renamed.with_suffix(".ass").read_text(encoding="utf-8") == "ass"
+    second = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01_2.mp4"
+    second.write_bytes(b"next")
+    collided = retitle_closed_file(second, "ゲスト出勤")
+    assert collided.name == "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01_2.mp4"
+    assert renamed.read_bytes() == b"video"
+    titled = tmp_path / "tiktok_@9ri_pi_20261111_044027_ゲスト出勤_seg01.mp4"
+    titled.write_bytes(b"kept")
+    assert retitle_closed_file(titled, "別の題") == titled
+
+
+def test_retitle_keeps_a_sidecar_when_the_destination_is_another_file(tmp_path: Path):
+    from live_recorder.recording.retitle import rewrite_stored_path, stage_retitle
+
+    video = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01.mp4"
+    video.write_bytes(b"video")
+    speech = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01_Speech.srt"
+    speech.write_text("ours", encoding="utf-8")
+    other = tmp_path / "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01_Speech.srt"
+    other.write_text("theirs", encoding="utf-8")
+    staged = stage_retitle(video, "ゲスト出勤")
+    assert staged is not None
+    stored = "day/" + speech.name
+    assert rewrite_stored_path(staged, stored) == stored
+    assert speech.read_text(encoding="utf-8") == "ours"
+    assert other.read_text(encoding="utf-8") == "theirs"
+
+
+def test_retitle_does_not_share_a_stem_with_an_open_ts(tmp_path: Path):
+    from live_recorder.recording.retitle import retitle_closed_file
+
+    video = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01.mp4"
+    video.write_bytes(b"mp4")
+    ts = tmp_path / "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01.ts"
+    ts.write_bytes(b"ts-long")
+    renamed = retitle_closed_file(video, "ゲスト出勤")
+    assert renamed.name == "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01_2.mp4"
+    assert ts.read_bytes() == b"ts-long"
+
+
+def test_long_title_does_not_stat_an_overlong_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import errno
+
+    real_exists = Path.exists
+
+    def guarded(self: Path) -> bool:
+        if len(self.name.encode("utf-8")) > 255:
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", guarded)
+    path = build_segment_path(
+        root=tmp_path,
+        platform="tiktok",
+        user_id="9ri_pi",
+        when_stamp="20261110_010756",
+        day="2026-11-10",
+        title="あ" * 200,
+        segment_number=1,
+    )
+    assert len(path.name.encode("utf-8")) <= 255
+    assert path.name.endswith("_seg01.ts")
+
+
 def test_resolve_rejects_escape(tmp_path: Path):
     with pytest.raises(PathEscape):
         resolve_stored(tmp_path, "../secret.mp4")
@@ -217,6 +317,23 @@ def test_comment_failure_still_has_a_terminal_state():
     assert empty == CommentJobStatus.FAILED
     assert empty_error == "comment_writer_failed"
     done, clean = comment_job_result(outcome="stopped", stored_count=3, has_gaps=False, writer_failed=False)
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from live_recorder.monitor.jobs import comment_gaps_for_job
+
+    job = SimpleNamespace(started_at=datetime(2026, 11, 12, 1, tzinfo=timezone.utc))
+    overlap = SimpleNamespace(
+        job_type="comments",
+        started_at=datetime(2026, 11, 12, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 11, 12, 1, 5, tzinfo=timezone.utc),
+    )
+    earlier = SimpleNamespace(
+        job_type="comments",
+        started_at=datetime(2026, 11, 11, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 11, 11, 2, tzinfo=timezone.utc),
+    )
+    assert comment_gaps_for_job([overlap, earlier], job) == [overlap]
     assert done == CommentJobStatus.COMPLETED
     assert clean is None
     dropped, _dropped_error = comment_job_result(
@@ -410,6 +527,45 @@ async def test_comments_since_backfills_when_a_page_is_full():
     assert pages.calls == [("100", None), (None, 0), (None, 50)]
 
 
+async def test_comments_since_walks_a_short_page_that_misses_the_cursor():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    class Short:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            self.calls.append((slice_id, offset))
+            if slice_id is not None:
+                return [_comment(item) for item in range(180, 139, -1)], 180, None
+            start = 0 if offset is None else offset
+            page = list(range(180, 0, -1))[start : start + limit]
+            return [_comment(item) for item in page], 180, None
+
+    pages = Short()
+    drafts, _, error, truncated = await fetch_comments_since(pages, "55", "100")
+    assert error is None and truncated is False
+    assert [int(item.platform_comment_id) for item in drafts] == list(range(101, 181))
+    assert pages.calls[0] == ("100", None)
+    assert (None, 0) in pages.calls
+
+
+async def test_comments_since_marks_a_hole_between_pages():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    class Hole:
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            if slice_id is not None or offset in (None, 0):
+                return [_comment(item) for item in range(200, 150, -1)], 200, None
+            return [_comment(item) for item in range(120, 70, -1)], 200, None
+
+    drafts, _, error, truncated = await fetch_comments_since(Hole(), "55", "50")
+    assert error is None and truncated is True
+    ids = [int(item.platform_comment_id) for item in drafts]
+    assert 151 in ids and 120 in ids
+    assert 140 not in ids
+
+
 async def test_comments_since_keeps_a_short_page_without_walking_history():
     from live_recorder.platforms.twitcasting import fetch_comments_since
 
@@ -444,6 +600,45 @@ async def test_comments_since_drops_nothing_into_the_cursor_when_backfill_fails(
 
     drafts, _, error, truncated = await fetch_comments_since(Broken(), "55", "100")
     assert drafts == [] and error == "rate_limited" and truncated is False
+
+
+async def test_truncated_comment_walk_retries_the_same_cursor():
+    import asyncio
+
+    from live_recorder.monitor.jobs import _collect_twitcasting
+
+    stop = asyncio.Event()
+
+    class Sink:
+        def __init__(self):
+            self.reconnects = 0
+            self.max_reconnects = 2
+
+        async def add(self, _draft):
+            return None
+
+    class Fake:
+        def __init__(self):
+            self.slices: list[str | None] = []
+
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            self.slices.append(slice_id)
+            if slice_id is None and offset is None:
+                return [_comment(1)], 1, None
+            if slice_id == "1":
+                if self.slices.count("1") >= 2:
+                    stop.set()
+                return [_comment(item) for item in range(80, 30, -1)], 80, None
+            return [_comment(item) for item in range(10, 0, -1)], 80, None
+
+    fake = Fake()
+
+    async def on_gap(_reason: str) -> None:
+        return None
+
+    outcome = await asyncio.wait_for(_collect_twitcasting(fake, "55", stop, Sink(), 0, on_gap), 2)
+    assert outcome == "stopped"
+    assert fake.slices.count("1") >= 2
 
 
 async def test_collect_twitcasting_backfills_without_a_tight_loop():

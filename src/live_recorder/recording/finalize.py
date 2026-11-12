@@ -181,6 +181,13 @@ def _written_after(source: Path, target: Path) -> bool:
         return False
 
 
+def _same_span(source_ms: int | None, other_ms: int | None) -> bool:
+    """長さが近いときだけ、既存の MP4 をこの TS の詰め直し結果とみなす。"""
+    if source_ms is None or other_ms is None or source_ms <= 0 or other_ms <= 0:
+        return False
+    return abs(source_ms - other_ms) <= max(500, int(source_ms * 0.02))
+
+
 def _free_mp4(source: Path) -> Path:
     counter = 2
     while counter < 1000:
@@ -209,7 +216,7 @@ async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFi
     # 落ちた直後の詰め直しだけを採用する。古い同名 MP4 は別の録画なので残す。
     if preferred.is_file() and preferred.resolve() != source.resolve() and _written_after(source, preferred):
         checked = await probe_file(ffprobe, preferred)
-        if checked.ok:
+        if checked.ok and _same_span(probed.duration_ms, checked.duration_ms):
             return FinalFile(
                 preferred, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, source
             )

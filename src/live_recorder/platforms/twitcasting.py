@@ -303,6 +303,21 @@ def _sorted_comments(drafts: list[CommentDraft]) -> list[CommentDraft]:
     return sorted(drafts, key=lambda item: _comment_number(item) or 0)
 
 
+def _reached_cursor(numbers: list[int], threshold: int) -> bool:
+    """このページが前回の ID の直後まで届いている。件数が少ないだけでは届いたことにしない。"""
+    return bool(numbers) and min(numbers) <= threshold + 1
+
+
+def _take_newer(drafts: list[CommentDraft], threshold: int, seen: set[str], collected: list[CommentDraft]) -> None:
+    for draft in drafts:
+        number = _comment_number(draft)
+        cid = draft.platform_comment_id or ""
+        if number is None or number <= threshold or not cid or cid in seen:
+            continue
+        seen.add(cid)
+        collected.append(draft)
+
+
 async def fetch_comments_since(
     client: TwitCastingClient,
     movie_id: str,
@@ -325,15 +340,22 @@ async def fetch_comments_since(
     page, total, error = await client.fetch_comments(movie_id, slice_id=last_id, limit=_COMMENT_PAGE)
     if error:
         return [], total, error, False
-    if len(page) < _COMMENT_PAGE or not str(last_id).isdigit():
+    if not str(last_id).isdigit():
         return _sorted_comments(page), total, None, False
 
     threshold = int(last_id)
+    page_numbers = [number for number in (_comment_number(item) for item in page) if number is not None]
+    if not page or _reached_cursor(page_numbers, threshold):
+        return _sorted_comments(page), total, None, False
+
     collected: list[CommentDraft] = []
     seen: set[str] = set()
+    _take_newer(page, threshold, seen, collected)
     offset = 0
     reached = False
+    hole = False
     pages = 0
+    previous_min = min(page_numbers) if page_numbers else None
     while pages < max_pages:
         batch, total, error = await client.fetch_comments(movie_id, limit=_COMMENT_PAGE, offset=offset)
         pages += 1
@@ -342,18 +364,16 @@ async def fetch_comments_since(
         if not batch:
             reached = True
             break
-        numbers: list[int] = []
-        for draft in batch:
-            number = _comment_number(draft)
-            if number is None:
-                continue
-            numbers.append(number)
-            cid = draft.platform_comment_id or ""
-            if number > threshold and cid not in seen:
-                seen.add(cid)
-                collected.append(draft)
-        if not numbers or min(numbers) <= threshold or len(batch) < _COMMENT_PAGE:
+        numbers = [number for number in (_comment_number(item) for item in batch) if number is not None]
+        if numbers and previous_min is not None and max(numbers) < previous_min - 1:
+            hole = True
+        if numbers:
+            previous_min = min(numbers)
+        _take_newer(batch, threshold, seen, collected)
+        if numbers and min(numbers) <= threshold:
             reached = True
             break
+        if len(batch) < _COMMENT_PAGE:
+            break
         offset += len(batch)
-    return _sorted_comments(collected), total, None, not reached
+    return _sorted_comments(collected), total, None, hole or not reached
