@@ -30,12 +30,7 @@ from live_recorder.platforms.tiktok import (
     pauses_tiktok_polling,
     room_fields,
 )
-from live_recorder.platforms.twitcasting import (
-    TWITCASTING_REFERER,
-    TWITCASTING_USER_AGENT,
-    TwitCastingClient,
-    fetch_comments_since,
-)
+from live_recorder.platforms.twitcasting import TwitCastingClient, fetch_comments_since
 from live_recorder.platforms.types import CommentDraft
 from live_recorder.recording.commands import (
     ffmpeg_hls_args,
@@ -68,6 +63,7 @@ from live_recorder.recording.retitle import (
     rollback_retitle,
     stage_retitle,
 )
+from live_recorder.recording.tc_hls import TcHlsError, record_tc_hls
 from live_recorder.speech.queue import assign_speech_queue
 from live_recorder.speech.srt import stored_speech_srt
 from live_recorder.timeutil import utcnow
@@ -192,28 +188,31 @@ async def run_engine(
     playlist: str | None = None,
 ) -> EngineRun:
     try:
-        if name == "streamlink" and platform == "tiktok":
-            args = streamlink_tiktok_args(settings.streamlink_path, user_id, str(output), quality)
-        elif name == "yt-dlp" and platform == "tiktok":
-            args = ytdlp_args(settings.ytdlp_path, tiktok_live_url(user_id), str(output))
-        elif name == "tiktoklive" and platform == "tiktok":
-            url = await _resolve_tiktok_url(user_id, quality, settings.sign_api_key)
-            args = ffmpeg_hls_args(settings.ffmpeg_path, url, str(output))
-        elif name == "official-hls" and platform == "twitcasting":
+        if name == "official-hls" and platform == "twitcasting":
             if not playlist:
                 return EngineRun(INTERRUPTED, 0, "tc-hls missing")
-            args = ffmpeg_hls_args(
-                settings.ffmpeg_path,
-                playlist,
-                str(output),
-                user_agent=TWITCASTING_USER_AGENT,
-                referer=TWITCASTING_REFERER,
+            result = await record_tc_hls(
+                ffmpeg=settings.ffmpeg_path,
+                playlist_url=playlist,
+                output=output,
+                stop=stop,
             )
-        elif name == "streamlink-hls" and platform == "twitcasting":
-            args = streamlink_twitcasting_args(settings.streamlink_path, user_id, str(output), quality)
         else:
-            return EngineRun(INTERRUPTED, 0, "unknown engine")
-        result = await run_process(args, stop)
+            if name == "streamlink" and platform == "tiktok":
+                args = streamlink_tiktok_args(settings.streamlink_path, user_id, str(output), quality)
+            elif name == "yt-dlp" and platform == "tiktok":
+                args = ytdlp_args(settings.ytdlp_path, tiktok_live_url(user_id), str(output))
+            elif name == "tiktoklive" and platform == "tiktok":
+                url = await _resolve_tiktok_url(user_id, quality, settings.sign_api_key)
+                args = ffmpeg_hls_args(settings.ffmpeg_path, url, str(output))
+            elif name == "streamlink-hls" and platform == "twitcasting":
+                args = streamlink_twitcasting_args(settings.streamlink_path, user_id, str(output), quality)
+            else:
+                return EngineRun(INTERRUPTED, 0, "unknown engine")
+            result = await run_process(args, stop)
+    except TcHlsError as exc:
+        log.info("twitcasting hls unavailable: %s", exc)
+        return EngineRun(INTERRUPTED, 0, str(exc)[:800])
     except Exception as exc:
         name_ = type(exc).__name__
         if "AgeRestricted" in name_:

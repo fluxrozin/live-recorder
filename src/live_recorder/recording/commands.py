@@ -74,12 +74,15 @@ def ffmpeg_hls_args(
     *,
     user_agent: str | None = None,
     referer: str | None = None,
+    read_timeout_us: int | None = None,
 ) -> list[str]:
     args = [binary, "-hide_banner", "-loglevel", "warning", "-nostdin"]
     if user_agent:
         args.extend(["-user_agent", user_agent])
     if referer:
         args.extend(["-headers", f"Referer: {referer}\r\n"])
+    if read_timeout_us is not None:
+        args.extend(["-rw_timeout", str(read_timeout_us)])
     args.extend(["-i", url, "-c", "copy", "-f", "mpegts", output])
     return args
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import signal
 from dataclasses import dataclass
+from pathlib import Path
 
 from live_recorder.redact import redact
 
@@ -12,6 +13,7 @@ class ProcessResult:
     returncode: int | None
     stderr: str
     stopped: bool
+    stalled: bool = False
 
 
 async def _read_limited(stream: asyncio.StreamReader | None, limit: int = 200_000) -> str:
@@ -45,7 +47,21 @@ async def _shutdown(proc: asyncio.subprocess.Process, kill_after: float) -> None
         await proc.wait()
 
 
-async def run_process(args: list[str], stop: asyncio.Event, *, kill_after: float = 12) -> ProcessResult:
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+async def run_process(
+    args: list[str],
+    stop: asyncio.Event,
+    *,
+    kill_after: float = 12,
+    idle_path: Path | None = None,
+    idle_timeout: float | None = None,
+) -> ProcessResult:
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.DEVNULL,
@@ -54,12 +70,27 @@ async def run_process(args: list[str], stop: asyncio.Event, *, kill_after: float
     stderr_task = asyncio.create_task(_read_limited(proc.stderr))
     cancelled = False
     stopped = stop.is_set()
+    stalled = False
+    last_size = -1
+    last_change = asyncio.get_running_loop().time()
     try:
         while proc.returncode is None:
             if stop.is_set():
                 stopped = True
                 await _shutdown(proc, kill_after)
                 break
+            if idle_path is not None and idle_timeout is not None:
+                size = _file_size(idle_path)
+                now = asyncio.get_running_loop().time()
+                if size != last_size:
+                    last_size = size
+                    last_change = now
+                elif now - last_change >= idle_timeout:
+                    # プレイリストの再読み込みが成功したままだと、FFmpeg は
+                    # 映像を書かずに待ち続ける。止めて録り直せるようにする。
+                    stalled = True
+                    await _shutdown(proc, kill_after)
+                    break
             try:
                 await asyncio.wait_for(proc.wait(), 0.5)
             except TimeoutError:
@@ -78,7 +109,12 @@ async def run_process(args: list[str], stop: asyncio.Event, *, kill_after: float
             stderr = ""
     else:
         stderr = ""
-    return ProcessResult(returncode=proc.returncode, stderr=stderr, stopped=stopped or stop.is_set())
+    return ProcessResult(
+        returncode=proc.returncode,
+        stderr=stderr,
+        stopped=stopped or stop.is_set(),
+        stalled=stalled,
+    )
 
 
 async def _shutdown_after_cancel(proc: asyncio.subprocess.Process, stderr_task: asyncio.Task[str]) -> None:

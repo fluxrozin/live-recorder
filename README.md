@@ -8,7 +8,7 @@ TikTok LIVE とツイキャスの公開配信を監視し、録画と視聴者�
 - 配信者一覧の並び。デフォルトはプラットフォームと表示名。カスタムはドラッグした順
 - 配信開始と終了の検知
 - Streamlink、yt-dlp、TikTokLive + FFmpeg による TikTok 録画
-- ツイキャスは配信プレイヤーと同じ tc-hls を FFmpeg で優先し、取れないときだけ Streamlink の HLS
+- ツイキャスは配信プレイヤーと同じ tc-hls を FFmpeg で優先する。開始直後のプリロールは除いてからコピーし、書き込みが止まったら同じエンジンで録り直す。取れない公開配信だけ Streamlink の HLS
 - コメントの検索と、録画に合わせた SRT 字幕の書き出し
 - 確定した録画の音声字幕と、音声とコメントを一つにした ASS
 - ホスト再起動後の監視再開と、録画中断区間の記録
@@ -51,7 +51,7 @@ uv sync --group dev
 uv run pytest
 ```
 
-実在の TikTok / ツイキャス配信への接続確認は、このリポジトリの自動テストには含まれていません。制限事項は [docs/LIMITATIONS.md](docs/LIMITATIONS.md) にまとめています。
+実在の TikTok / ツイキャス配信への接続確認は、このリポジトリの自動テストには含まれていません。ツイキャスのプリロール除去は、配信へ接続しないプレイリストの単体テストです。制限事項は [docs/LIMITATIONS.md](docs/LIMITATIONS.md)、設定は [docs/CONFIGURATION.md](docs/CONFIGURATION.md)、障害時の確認は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) にまとめています。
 
 ## 構成
 

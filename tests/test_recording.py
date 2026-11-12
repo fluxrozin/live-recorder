@@ -317,6 +317,233 @@ def test_twitcasting_ffmpeg_sends_player_headers_only_when_asked():
     plain = ffmpeg_hls_args("ffmpeg", "https://cdn.example/live.m3u8", "out.ts")
     assert "-user_agent" not in plain
     assert "-headers" not in plain
+    timed = ffmpeg_hls_args("ffmpeg", "https://edge.twitcasting.tv/live.m3u8", "out.ts", read_timeout_us=30_000_000)
+    assert timed[timed.index("-rw_timeout") + 1] == "30000000"
+    assert timed.index("-rw_timeout") < timed.index("-i")
+
+
+_PLAYLIST = "https://203-0-113-10.twitcasting.tv/tc.livehls/v1/streams/819154156/hls/672.96/media.m3u8"
+_PREROLL_PLAYLIST = """#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:9
+#EXT-X-MEDIA-SEQUENCE:2
+#EXT-X-MAP:URI="/tc.livehls/v1/streams/819154156/hls/preroll-init.2.mp4"
+#EXTINF:2.000,
+/tc.livehls/v1/streams/819154156/hls/preroll-media.2.mp4
+#EXT-X-DISCONTINUITY
+#EXT-X-MAP:URI="/tc.livehls/v1/streams/819154156/hls/672.96/init.3.mp4"
+#EXTINF:8.332,
+/tc.livehls/v1/streams/819154156/hls/672.96/media.0.mp4
+#EXTINF:8.334,
+/tc.livehls/v1/streams/819154156/hls/672.96/media.1.mp4
+"""
+
+
+def test_preroll_segments_are_removed_and_sequence_advances():
+    from live_recorder.recording.tc_hls import filter_preroll_playlist
+
+    filtered = filter_preroll_playlist(_PREROLL_PLAYLIST, _PLAYLIST)
+    assert filtered.dropped_preroll == 1
+    assert filtered.kept_segments == 2
+    assert "preroll-" not in filtered.text
+    assert "#EXT-X-DISCONTINUITY" not in filtered.text
+    assert "#EXT-X-MEDIA-SEQUENCE:3" in filtered.text
+    assert filtered.text.index("init.3.mp4") < filtered.text.index("media.0.mp4")
+    assert "https://203-0-113-10.twitcasting.tv/tc.livehls/v1/streams/819154156/hls/672.96/media.0.mp4" in filtered.text
+    assert "https://203-0-113-10.twitcasting.tv/tc.livehls/v1/streams/819154156/hls/672.96/init.3.mp4" in filtered.text
+
+
+def test_two_preroll_segments_advance_the_media_sequence_by_two():
+    from live_recorder.recording.tc_hls import filter_preroll_playlist
+
+    playlist = """#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:1
+#EXTINF:2.000,
+/hls/preroll-media.1.mp4
+#EXTINF:2.000,
+/hls/preroll-media.2.mp4
+#EXT-X-DISCONTINUITY
+#EXT-X-MAP:URI="/hls/high/init.mp4"
+#EXTINF:8.0,
+/hls/high/media.0.mp4
+"""
+    base = "https://edge.twitcasting.tv/hls/high/media.m3u8"
+    filtered = filter_preroll_playlist(playlist, base)
+    assert filtered.dropped_preroll == 2
+    assert filtered.kept_segments == 1
+    assert "#EXT-X-MEDIA-SEQUENCE:3" in filtered.text
+    assert "https://edge.twitcasting.tv/hls/high/media.0.mp4" in filtered.text
+    assert "#EXT-X-DISCONTINUITY" not in filtered.text
+
+
+def test_real_discontinuity_stays_when_there_is_no_preroll():
+    from live_recorder.recording.tc_hls import filter_preroll_playlist
+
+    playlist = """#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:5
+#EXTINF:8.0,
+https://edge.twitcasting.tv/a/media.0.mp4
+#EXT-X-DISCONTINUITY
+#EXTINF:8.0,
+https://edge.twitcasting.tv/a/media.1.mp4
+"""
+    filtered = filter_preroll_playlist(playlist, "https://edge.twitcasting.tv/a/media.m3u8")
+    assert filtered.dropped_preroll == 0
+    assert filtered.kept_segments == 2
+    assert "#EXT-X-MEDIA-SEQUENCE:5" in filtered.text
+    assert "#EXT-X-DISCONTINUITY" in filtered.text
+
+
+def test_highest_variant_skips_other_hosts():
+    from live_recorder.recording.tc_hls import highest_variant
+
+    playlist = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000
+https://edge.twitcasting.tv/low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000
+https://evil.example/high.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1500000
+https://edge.twitcasting.tv/mid.m3u8
+"""
+    assert highest_variant(playlist, "https://twitcasting.tv/master.m3u8") == "https://edge.twitcasting.tv/mid.m3u8"
+    assert highest_variant("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://evil.example/x.m3u8\n", "https://twitcasting.tv/m.m3u8") is None
+
+
+def test_mirror_serves_playlist_without_preroll():
+    import asyncio
+
+    import httpx
+
+    from live_recorder.recording.tc_hls import TcHlsMirror
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["referer"] == "https://twitcasting.tv/"
+        assert request.url == _PLAYLIST
+        return httpx.Response(200, text=_PREROLL_PLAYLIST)
+
+    async def run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+            mirror = TcHlsMirror(_PLAYLIST, client=client)
+            try:
+                local = await mirror.ffmpeg_input(asyncio.Event())
+                assert local is not None
+                assert local.startswith("http://127.0.0.1:")
+                async with httpx.AsyncClient() as reader:
+                    served = await reader.get(local)
+                assert served.status_code == 200
+                assert "preroll-" not in served.text
+                assert "media.0.mp4" in served.text
+                assert "#EXT-X-MEDIA-SEQUENCE:3" in served.text
+            finally:
+                await mirror.aclose()
+
+    asyncio.run(run())
+
+
+def test_clean_playlist_is_given_to_ffmpeg_directly():
+    import asyncio
+
+    import httpx
+
+    from live_recorder.recording.tc_hls import TcHlsMirror
+
+    clean = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:4\n#EXTINF:8.0,\nhttps://edge.twitcasting.tv/a/media.0.mp4\n"
+    url = "https://edge.twitcasting.tv/a/media.m3u8"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=clean)
+
+    async def run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+            mirror = TcHlsMirror(url, client=client)
+            try:
+                opened = await mirror.ffmpeg_input(asyncio.Event())
+                assert opened == url
+                assert mirror._server is None
+            finally:
+                await mirror.aclose()
+
+    asyncio.run(run())
+
+
+def test_preroll_only_playlist_fails_without_waiting_out_the_live():
+    import asyncio
+
+    import httpx
+
+    from live_recorder.recording.tc_hls import TcHlsError, TcHlsMirror
+
+    only = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2.0,\n/hls/preroll-media.1.mp4\n"
+    url = "https://edge.twitcasting.tv/hls/high/media.m3u8"
+
+    async def run() -> None:
+        transport = httpx.MockTransport(lambda _request: httpx.Response(200, text=only))
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+            mirror = TcHlsMirror(url, client=client, wait_seconds=0)
+            try:
+                with pytest.raises(TcHlsError, match="no media"):
+                    await mirror.ffmpeg_input(asyncio.Event())
+            finally:
+                await mirror.aclose()
+
+    asyncio.run(run())
+
+
+def test_idle_output_stops_a_silent_process(tmp_path: Path):
+    import asyncio
+
+    from live_recorder.recording.process import run_process
+
+    async def run():
+        return await run_process(
+            ["sleep", "30"],
+            asyncio.Event(),
+            idle_path=tmp_path / "out.ts",
+            idle_timeout=0.4,
+        )
+
+    result = asyncio.run(run())
+    assert result.stalled
+    assert not result.stopped
+    assert result.returncode is not None
+
+
+def test_growing_output_is_not_treated_as_stalled(tmp_path: Path):
+    import asyncio
+    import sys
+
+    from live_recorder.recording.process import run_process
+
+    target = tmp_path / "out.ts"
+    script = (
+        "import pathlib, sys, time\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "for _ in range(40):\n"
+        "    with path.open('ab') as handle:\n"
+        "        handle.write(b'x')\n"
+        "    time.sleep(0.05)\n"
+    )
+
+    async def run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            run_process(
+                [sys.executable, "-c", script, str(target)],
+                stop,
+                idle_path=target,
+                idle_timeout=0.4,
+            )
+        )
+        await asyncio.sleep(0.8)
+        stop.set()
+        return await task
+
+    result = asyncio.run(run())
+    assert result.stopped
+    assert not result.stalled
+    assert target.stat().st_size > 0
 
 
 def test_streamlink_command_uses_normalized_url():
