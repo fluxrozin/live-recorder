@@ -4,7 +4,7 @@ import re
 import uuid
 from pathlib import Path
 
-from live_recorder.recording.files import fit_export_name
+from live_recorder.recording.files import fit_export_name, resolve_stored
 from live_recorder.speech.quality import SpeechCue
 
 SPEECH_EXPORT_SUFFIX = "_Speech.srt"
@@ -21,6 +21,16 @@ def speech_export_name(video_name: str) -> str:
 
 def speech_srt_path(video: Path) -> Path:
     return video.with_name(speech_export_name(video.name))
+
+
+def stored_speech_srt(root: Path, relative: str | None) -> Path | None:
+    """DB に記録した音声字幕のパス。記録が無い、または録画フォルダの外なら None。"""
+    if not relative:
+        return None
+    try:
+        return resolve_stored(root, relative)
+    except ValueError:
+        return None
 
 
 def unlink_speech_sidecar(video: Path) -> None:

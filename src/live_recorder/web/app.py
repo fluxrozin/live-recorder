@@ -16,7 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from live_recorder import __version__
 from live_recorder.cli import verify_password
-from live_recorder.comments.ass import refresh_combined_ass, unlink_combined_ass
+from live_recorder.comments.ass import probe_display_size, refresh_combined_ass, unlink_combined_ass
 from live_recorder.comments.export import encode_export, export_row
 from live_recorder.comments.segments import (
     ExportSegment,
@@ -58,7 +58,12 @@ from live_recorder.recording.files import PathEscape, resolve_stored
 from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.process import command_output
 from live_recorder.speech.queue import requeue_speech
-from live_recorder.speech.srt import read_speech_cues, speech_srt_path, unlink_speech_sidecar
+from live_recorder.speech.srt import (
+    read_speech_cues,
+    speech_srt_path,
+    stored_speech_srt,
+    unlink_speech_sidecar,
+)
 from live_recorder.timeutil import (
     ensure_aware,
     format_local,
@@ -704,6 +709,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if blocked:
             return blocked
         tz = await runtime_tz(request)
+        settings = request.app.state.settings
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             found = await repo.segment_with_session(segment_id)
@@ -711,6 +717,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404)
             segment, session_id = found
             if segment.file_removed:
+                raise HTTPException(404)
+            try:
+                probed = resolve_stored(settings.recordings_dir, segment.file_path)
+            except PathEscape as exc:
+                raise HTTPException(404) from exc
+            play_size = await asyncio.to_thread(probe_display_size, settings.ffprobe_path, probed)
+            if await repo.lock_session(session_id) is None:
+                raise HTTPException(404)
+            current = await repo.fresh_segment(segment_id)
+            if current is None or current.file_removed:
+                raise HTTPException(404)
+            try:
+                video = resolve_stored(settings.recordings_dir, current.file_path)
+            except PathEscape as exc:
+                raise HTTPException(404) from exc
+            if not video.is_file():
                 raise HTTPException(404)
             windows = [_window(item) for item in await repo.segments_for_session(session_id)]
             stored = await repo.export_comments_for_segments(session_id, windows, only_id=segment_id)
@@ -730,17 +752,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     for comment in grouped
                 ]
-            await repo.lock_session(session_id)
-            current = await repo.get_segment(segment_id)
-            if current is None or current.file_removed:
-                raise HTTPException(404)
-            relative = current.file_path
-            try:
-                video = resolve_stored(request.app.state.settings.recordings_dir, relative)
-            except PathEscape as exc:
-                raise HTTPException(404) from exc
-            if not video.is_file():
-                raise HTTPException(404)
             comment_path = video.with_name(comment_export_name(video.name))
             if rows:
                 payload, _media = encode_export(rows)
@@ -751,7 +762,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 written = await asyncio.to_thread(
                     refresh_combined_ass,
                     video,
-                    ffprobe=request.app.state.settings.ffprobe_path,
+                    play_size=play_size,
+                    speech_srt=stored_speech_srt(settings.recordings_dir, current.speech_srt_path),
                 )
             except Exception as exc:
                 raise HTTPException(404) from exc
@@ -921,6 +933,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if form.get("confirm") != "yes":
             flash(request, "ファイル削除の確認が必要です", "warning")
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
+        root = request.app.state.settings.recordings_dir
+        pending: list[tuple[Path, str | None]] = []
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             if await repo.deletion_blocked(session_id):
@@ -930,16 +944,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if segment.file_removed:
                     continue
                 try:
-                    path = resolve_stored(request.app.state.settings.recordings_dir, segment.file_path)
+                    path = resolve_stored(root, segment.file_path)
                 except PathEscape:
                     continue
-                if path.is_file():
-                    path.unlink()
-                _unlink_comment_sidecars(path)
-                _unlink_speech_files(request.app.state.settings.recordings_dir, path, segment.speech_srt_path)
+                pending.append((path, segment.speech_srt_path))
                 segment.file_removed = True
             await repo.add_event("file_deleted", "録画ファイルを削除しました", session_id=session_id)
             await session.commit()
+        for path, speech_relative in pending:
+            if path.is_file():
+                path.unlink()
+            _unlink_comment_sidecars(path)
+            _unlink_speech_files(root, path, speech_relative)
         flash(request, "録画ファイルを削除しました。履歴は残しています")
         return RedirectResponse(f"/recordings/{session_id}", status_code=303)
 
@@ -954,6 +970,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             flash(request, "履歴削除の確認が必要です", "warning")
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
         delete_files_too = form.get("delete_files") == "yes"
+        root = request.app.state.settings.recordings_dir
+        pending_videos: list[tuple[Path, str | None]] = []
+        pending_exports: list[Path] = []
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             if await repo.deletion_blocked(session_id):
@@ -962,28 +981,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             item = await repo.get_session(session_id)
             if item is None:
                 raise HTTPException(404)
-            segments = await repo.segments_for_session(session_id)
-            comment_job = await repo.latest_comment_job(session_id)
-            export_path = comment_job.export_path if comment_job else None
-            for segment in segments:
+            for segment in await repo.segments_for_session(session_id):
                 try:
-                    path = resolve_stored(request.app.state.settings.recordings_dir, segment.file_path)
+                    path = resolve_stored(root, segment.file_path)
                 except PathEscape:
                     continue
-                if delete_files_too and path.is_file():
-                    path.unlink()
-                if delete_files_too:
-                    _unlink_speech_files(request.app.state.settings.recordings_dir, path, segment.speech_srt_path)
-                _unlink_comment_sidecars(path)
-            if export_path:
+                pending_videos.append((path, segment.speech_srt_path if delete_files_too else None))
+            comment_job = await repo.latest_comment_job(session_id)
+            if comment_job and comment_job.export_path:
                 try:
-                    path = resolve_stored(request.app.state.settings.recordings_dir, export_path)
-                    if path.is_file():
-                        path.unlink()
+                    pending_exports.append(resolve_stored(root, comment_job.export_path))
                 except PathEscape:
                     pass
             await repo.delete_session(session_id)
             await session.commit()
+        for path, speech_relative in pending_videos:
+            if delete_files_too and path.is_file():
+                path.unlink()
+            if delete_files_too:
+                _unlink_speech_files(root, path, speech_relative)
+            _unlink_comment_sidecars(path)
+        for path in pending_exports:
+            if path.is_file():
+                path.unlink()
         flash(request, "履歴を削除しました")
         return RedirectResponse("/recordings", status_code=303)
 

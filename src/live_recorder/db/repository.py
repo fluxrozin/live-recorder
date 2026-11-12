@@ -138,9 +138,24 @@ class Repository:
         )
 
     async def lock_session(self, session_id: int) -> StreamSession | None:
-        """削除とジョブ作成がすれ違わないよう、配信行をロックする。"""
+        """削除・ジョブ作成・字幕の公開がすれ違わないよう、配信行をロックする。
+
+        FOR NO KEY UPDATE なので、同じ配信へのコメント INSERT（外部キー確認）は待たせない。
+        """
         return await self.session.scalar(
-            select(StreamSession).where(StreamSession.id == session_id).with_for_update()
+            select(StreamSession)
+            .options(selectinload(StreamSession.streamer))
+            .where(StreamSession.id == session_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+
+    async def fresh_segment(self, segment_id: int) -> RecordingSegment | None:
+        """読み込み済みの古い値を使わず、DB の今の行を読む。"""
+        return await self.session.scalar(
+            select(RecordingSegment)
+            .where(RecordingSegment.id == segment_id)
+            .execution_options(populate_existing=True)
         )
 
     async def deletion_blocked(self, session_id: int) -> bool:
@@ -233,6 +248,17 @@ class Repository:
             select(RecordingSegment)
             .where(RecordingSegment.recording_job_id == job_id)
             .order_by(RecordingSegment.segment_number)
+        )
+        return list(result)
+
+    async def lock_segments_for_job(self, job_id: int) -> list[RecordingSegment]:
+        """文字起こしの取得と重ならないよう、セグメント行をロックして今の値を読む。"""
+        result = await self.session.scalars(
+            select(RecordingSegment)
+            .where(RecordingSegment.recording_job_id == job_id)
+            .order_by(RecordingSegment.segment_number)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return list(result)
 
@@ -616,6 +642,7 @@ class Repository:
             .join(RecordingJob)
             .where(RecordingJob.stream_session_id == session_id)
             .order_by(RecordingSegment.started_at)
+            .execution_options(populate_existing=True)
         )
         return list(result)
 
@@ -837,7 +864,33 @@ class Repository:
         )
         return list(result)
 
+    async def expired_session_ids(self, older_than: datetime) -> list[int]:
+        """保存期限を過ぎたファイルを持つ配信。ロックの順を揃えるため ID 順に返す。"""
+        result = await self.session.scalars(
+            select(RecordingJob.stream_session_id)
+            .join(RecordingSegment, RecordingSegment.recording_job_id == RecordingJob.id)
+            .where(
+                RecordingSegment.file_removed.is_(False),
+                RecordingSegment.finished_at.is_not(None),
+                RecordingSegment.finished_at < older_than,
+            )
+            .distinct()
+            .order_by(RecordingJob.stream_session_id)
+        )
+        return list(result)
+
+    async def sessions_with_comments_before(self, older_than: datetime) -> list[int]:
+        """古いコメントを持つ配信。ロックの順を揃えるため ID 順に返す。"""
+        result = await self.session.scalars(
+            select(Comment.stream_session_id)
+            .where(Comment.created_at < older_than)
+            .distinct()
+            .order_by(Comment.stream_session_id)
+        )
+        return list(result)
+
     async def delete_comments_before(self, older_than: datetime) -> tuple[int, set[int]]:
+        """古いコメントを消す。呼び出し側は先に対象配信を lock_session しておく。"""
         result = await self.session.execute(
             delete(Comment).where(Comment.created_at < older_than).returning(Comment.stream_session_id)
         )

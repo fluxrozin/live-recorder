@@ -23,6 +23,8 @@ def extract_audio(ffmpeg: str, video: Path, wav: Path, *, ffprobe: str | None = 
         "86400",
         "-i",
         str(video),
+        "-map",
+        "0:a:0",
         "-vn",
         "-af",
         filters,

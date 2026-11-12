@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,20 +16,20 @@ from live_recorder.speech.srt import speech_export_name
 
 log = logging.getLogger(__name__)
 _LEGACY_SUFFIXES = (".jsonl", ".csv", ".txt")
+_NO_LINK = {errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK}
 
 
 @dataclass
 class StagedRetitle:
-    """新しい名前へリンクした状態。DB が確定するまで元の名前も残す。"""
+    """新しい名前を作った状態。DB が確定するまで元の名前も残す。"""
 
     source: Path
     dest: Path
     links: list[tuple[Path, Path, str]] = field(default_factory=list)
-    release_sources: bool = True
 
 
 def stage_retitle(path: Path, title: str | None) -> StagedRetitle | None:
-    """新しい名前をハードリンクする。移さないとき、または対象外のときは None。"""
+    """新しい名前を作る。移さないとき、または対象外のときは None。"""
     if not path.is_file():
         return None
     try:
@@ -37,28 +39,22 @@ def stage_retitle(path: Path, title: str | None) -> StagedRetitle | None:
         return None
     if dest is None:
         return None
-    links: list[tuple[Path, Path, str]] = []
+    staged = StagedRetitle(path, dest)
     try:
         for src, dst in _sidecar_pairs(path, dest):
-            kind = _place(src, dst)
-            if kind is not None:
-                links.append((src, dst, kind))
-        kind = _place(path, dest)
-        if kind is None:
-            _drop_new(links)
+            _place(src, dst, staged.links)
+        if not _place(path, dest, staged.links):
+            _drop_new(staged.links)
             return None
-        links.append((path, dest, kind))
     except OSError:
         log.exception("retitle failed for %s", path)
-        _drop_new(links)
+        _drop_new(staged.links)
         return None
-    return StagedRetitle(path, dest, links)
+    return staged
 
 
 def publish_retitle(staged: StagedRetitle) -> None:
-    """DB が新しいパスを指したあと、古い名前を消す。文字起こし中の複製は残す。"""
-    if not staged.release_sources:
-        return
+    """DB が新しいパスを指したあと、古い名前を消す。"""
     for src, dst, kind in staged.links:
         try:
             if not src.is_file() or not dst.is_file() or src == dst:
@@ -86,7 +82,7 @@ def retitle_closed_file(path: Path, title: str | None) -> Path:
 
 
 def rewrite_stored_path(staged: StagedRetitle, relative: str | None) -> str | None:
-    """実際にリンクしたファイル名だけを、新しいパスへ合わせる。"""
+    """実際に作った新しい名前だけを、保存パスへ反映する。"""
     if relative is None:
         return None
     mapping = {src.name: dst.name for src, dst, _kind in staged.links}
@@ -96,41 +92,56 @@ def rewrite_stored_path(staged: StagedRetitle, relative: str | None) -> str | No
     return Path(relative).with_name(renamed).as_posix()
 
 
-def _place(src: Path, dst: Path) -> str | None:
-    """同じ内容の新しい名前を作る。別のファイルが既にあるときは None。"""
+def _place(src: Path, dst: Path, links: list[tuple[Path, Path, str]]) -> bool:
+    """既存のファイルを上書きせずに新しい名前を作る。作れたものはすぐ links に載せる。"""
     if not src.is_file() or src == dst:
-        return None
-    if dst.exists():
-        try:
-            if src.samefile(dst):
-                return "link"
-        except OSError:
-            return None
-        return None
+        return False
     try:
         os.link(src, dst)
-        return "link"
-    except OSError:
-        shutil.copy2(src, dst)
-        return "copy"
+    except FileExistsError:
+        try:
+            same = src.samefile(dst)
+        except OSError:
+            return False
+        if same:
+            links.append((src, dst, "link"))
+        return same
+    except OSError as exc:
+        if exc.errno not in _NO_LINK:
+            raise
+        return _copy_into(src, dst, links)
+    links.append((src, dst, "link"))
+    return True
+
+
+def _copy_into(src: Path, dst: Path, links: list[tuple[Path, Path, str]]) -> bool:
+    """リンクできないときは、名前を排他的に確保してから一時ファイル経由で写す。"""
+    try:
+        reserved = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    os.close(reserved)
+    links.append((src, dst, "copy"))
+    temporary = dst.with_name(f".retitle-{uuid.uuid4().hex[:12]}.tmp")
+    try:
+        shutil.copy2(src, temporary)
+        temporary.replace(dst)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 def _drop_new(links: list[tuple[Path, Path, str]]) -> None:
-    for src, dst, _kind in reversed(links):
+    for src, dst, kind in reversed(links):
         try:
-            if not dst.is_file() or src == dst:
+            if src == dst or not src.is_file():
                 continue
-            if src.is_file():
-                try:
-                    if src.samefile(dst):
-                        dst.unlink()
-                        continue
-                except OSError:
-                    pass
-            if src.is_file():
-                dst.unlink()
+            if kind == "link" and dst.is_file() and not src.samefile(dst):
+                continue
+            dst.unlink(missing_ok=True)
         except OSError:
             log.exception("retitle rollback failed for %s", dst)
+    links.clear()
 
 
 def _sidecar_pairs(old: Path, new: Path) -> list[tuple[Path, Path]]:

@@ -150,6 +150,11 @@ def _present(path: Path) -> bool:
         return False
 
 
+def stem_taken(candidate: Path) -> bool:
+    """他の録画の TS や MP4 と同じ幹になる名前なら True。"""
+    return _stem_taken(candidate)
+
+
 def _stem_taken(candidate: Path) -> bool:
     """同じ幹の TS、確定済みの MP4、詰め直し途中のファイルがある名前は使わない。"""
     if not _within_name_limit(candidate):

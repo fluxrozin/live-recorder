@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,6 +64,7 @@ from live_recorder.recording.retitle import (
     stage_retitle,
 )
 from live_recorder.speech.queue import assign_speech_queue
+from live_recorder.speech.srt import stored_speech_srt
 from live_recorder.timeutil import utcnow
 
 log = logging.getLogger(__name__)
@@ -387,13 +389,6 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             async with db.session() as session:
                 repo = Repository(session)
                 job = await repo.get_recording_job(job_id)
-                current = await repo.get_session(session_id)
-                if opened and not drop_segment and final_path is not None and final_path.is_file():
-                    staged = stage_retitle(final_path, current.title if current else None)
-                    if staged is not None:
-                        await _point_exports_at(repo, session_id, staged)
-                        final_path = staged.dest
-                        open_retitles.append(staged)
                 if opened and not drop_segment and final_path is not None:
                     segment = await session.get(
                         __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
@@ -412,6 +407,11 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                             enabled=speech_runtime.speech_subtitles_enabled,
                             has_media=has_media,
                         )
+                    current = await repo.lock_session(session_id)
+                    if current is not None and current.title:
+                        await _retitle_finished_segments(
+                            repo, settings.recordings_dir, session_id, job_id, current.title, open_retitles
+                        )
                 elif drop_segment:
                     segment = await session.get(
                         __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
@@ -424,8 +424,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                         await repo.mark_engine(engine, ok=False, reason=outcome.error or outcome.kind)
                     elif size >= 64 * 1024:
                         await repo.mark_engine(engine, ok=True)
-                await session.commit()
-            _release_retitles(open_retitles, publish=True)
+                await _commit_and_publish(session, open_retitles)
             if drop_segment and path is not None:
                 path.unlink(missing_ok=True)
             discard_obsolete(obsolete)
@@ -471,14 +470,12 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
         async with db.session() as session:
             repo = Repository(session)
             job = await repo.get_recording_job(job_id)
-            stream = await repo.get_session(session_id)
             if job is None:
                 return
+            stream = await repo.lock_session(session_id)
             if stream is not None and stream.title:
-                open_retitles.extend(
-                    await _retitle_finished_segments(
-                        repo, settings.recordings_dir, session_id, job_id, stream.title
-                    )
+                await _retitle_finished_segments(
+                    repo, settings.recordings_dir, session_id, job_id, stream.title, open_retitles
                 )
             if leave_recording_open(
                 stopped=stop.is_set(),
@@ -487,8 +484,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             ):
                 if job.status in {RecordingStatus.STARTING.value, RecordingStatus.RECORDING.value}:
                     repo.move_recording(job, RecordingStatus.RECONNECTING)
-                await session.commit()
-                _release_retitles(open_retitles, publish=True)
+                await _commit_and_publish(session, open_retitles)
                 return
             has_media = await repo.any_valid_segment(job_id)
             gaps = await repo.gaps_for_session(session_id)
@@ -512,8 +508,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             severity = "info" if target in {RecordingStatus.COMPLETED, RecordingStatus.CANCELLED, RecordingStatus.PARTIAL} else "error"
             event = "recording_finished" if target != RecordingStatus.FAILED else "recording_failed"
             await repo.add_event(event, f"録画を {target.value} で終了", severity=severity, session_id=session_id)
-            await session.commit()
-            _release_retitles(open_retitles, publish=True)
+            await _commit_and_publish(session, open_retitles)
     except Exception:
         _release_retitles(open_retitles, publish=False)
         log.exception("recording job %s crashed", job_id)
@@ -526,6 +521,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                 await repo.add_event("recording_failed", "録画処理が異常終了しました", severity="error", session_id=job.stream_session_id)
                 await session.commit()
     finally:
+        _release_retitles(open_retitles, publish=False)
         watcher.cancel()
 
 
@@ -642,24 +638,32 @@ async def _collect_tiktok(
     client = TikTokLiveClient(unique_id=user_id)
     gate = asyncio.Lock()
     room_open = False
+    attempt = 0
     held: list[CommentDraft] = []
 
     @client.on(ConnectEvent)
     async def on_connect(event: object) -> None:
         nonlocal room_open
+        started = attempt
         room_id = getattr(event, "room_id", None)
         info = getattr(client, "room_info", None)
-        matched = await on_room(str(room_id) if room_id else None, info if isinstance(info, dict) else None)
+        try:
+            matched = await on_room(str(room_id) if room_id else None, info if isinstance(info, dict) else None)
+        except Exception:
+            log.exception("tiktok room check failed for %s", user_id)
+            matched = None
         async with gate:
+            if started != attempt:
+                return
             if matched is False:
                 held.clear()
                 stop.set()
                 return
             room_open = True
-            pending = held
+            pending = list(held)
             held.clear()
-        for draft in pending:
-            await sink.add(draft)
+            for draft in pending:
+                await sink.add(draft)
 
     @client.on(CommentEvent)
     async def on_comment(event: object) -> None:
@@ -689,6 +693,10 @@ async def _collect_tiktok(
             except TimeoutError:
                 continue
             continue
+        async with gate:
+            attempt += 1
+            room_open = False
+            held.clear()
         connect_task = asyncio.create_task(client.connect(fetch_room_info=True))
         stop_task = asyncio.create_task(stop.wait())
         await asyncio.wait({connect_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -732,9 +740,12 @@ async def _collect_twitcasting(
     on_gap,
 ) -> str:
     last_id: str | None = None
+    last_total: int | None = None
     first = True
     while not stop.is_set():
-        drafts, total, error, truncated = await fetch_comments_since(tc, movie_id, last_id)
+        drafts, total, error, truncated = await fetch_comments_since(
+            tc, movie_id, last_id, last_total=last_total
+        )
         if error:
             sink.reconnects += 1
             if sink.reconnects > sink.max_reconnects:
@@ -754,8 +765,10 @@ async def _collect_twitcasting(
             for item in drafts
             if item.platform_comment_id and item.platform_comment_id.isdigit()
         ]
-        if numeric and not truncated:
+        if numeric:
             last_id = str(max(numeric))
+        if total is not None:
+            last_total = total
         for draft in drafts:
             await sink.add(draft)
         try:
@@ -853,6 +866,7 @@ async def run_comment_job(
         watcher.cancel()
     async with db.session() as session:
         repo = Repository(session)
+        await repo.lock_session(session_id)
         job = await repo.get_comment_job(job_id)
         if job is None:
             return
@@ -912,16 +926,24 @@ def _write_comment_file(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_bytes(body)
 
 
-async def _refresh_ass(video: Path, ffprobe: str) -> None:
+async def _refresh_ass(settings: Settings, video: Path, speech_relative: str | None) -> None:
     try:
-        await asyncio.to_thread(refresh_combined_ass, video, ffprobe=ffprobe)
+        await asyncio.to_thread(
+            refresh_combined_ass,
+            video,
+            ffprobe=settings.ffprobe_path,
+            speech_srt=stored_speech_srt(settings.recordings_dir, speech_relative),
+        )
     except Exception:
         log.exception("combined ass failed")
 
 
 async def _auto_export(settings: Settings, repo: Repository, session_id: int, job, tz_name: str) -> None:
+    """配信行をロックしてから書き出す。削除と同時に字幕を書き戻さない。"""
     try:
-        stream = await repo.get_session(session_id)
+        stream = await repo.lock_session(session_id)
+        if stream is None:
+            return
         stored = [segment for segment in await repo.segments_for_session(session_id) if not segment.file_removed]
         windows = [
             ExportSegment(
@@ -948,7 +970,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                 target = video.with_name(comment_export_name(window.file_name))
                 if not grouped:
                     target.unlink(missing_ok=True)
-                    await _refresh_ass(video, settings.ffprobe_path)
+                    await _refresh_ass(settings, video, segment.speech_srt_path)
                     continue
                 rows = [
                     _comment_row(
@@ -960,7 +982,7 @@ async def _auto_export(settings: Settings, repo: Repository, session_id: int, jo
                     for comment in grouped
                 ]
                 _write_comment_file(target, rows)
-                await _refresh_ass(video, settings.ffprobe_path)
+                await _refresh_ass(settings, video, segment.speech_srt_path)
                 written.append(target)
         else:
             comments = await repo.export_comments(
@@ -998,33 +1020,74 @@ def _release_retitles(staged: list[StagedRetitle], *, publish: bool) -> None:
     staged.clear()
 
 
+async def _commit_and_publish(session, staged: list[StagedRetitle]) -> None:
+    """DB が新しいパスを指したら、すぐ古い名前を消す。コミット後に取り消さない。"""
+    await session.commit()
+    # commit が返った時点で DB は新パス。取り消し対象から外してから古い名前を消す。
+    pending = list(staged)
+    staged.clear()
+    for item in pending:
+        publish_retitle(item)
+
+
+async def _stage_retitle(path: Path, title: str | None, sink: list[StagedRetitle]) -> StagedRetitle | None:
+    """付け直しを別スレッドで行う。キャンセルされても作成物を sink に残す。"""
+    box: list[StagedRetitle | None] = [None]
+    finished = threading.Event()
+
+    def run() -> StagedRetitle | None:
+        try:
+            staged = stage_retitle(path, title)
+            box[0] = staged
+            if staged is not None:
+                sink.append(staged)
+            return staged
+        finally:
+            finished.set()
+
+    try:
+        return await asyncio.to_thread(run)
+    except asyncio.CancelledError:
+        # 3.11 以降はキャンセル中の await がすぐ再送出するので、いったん解除してスレッドを待つ。
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+        await asyncio.to_thread(finished.wait)
+        raise
+
+
 async def _point_exports_at(repo: Repository, session_id: int, staged: StagedRetitle) -> None:
     for comment_job in await repo.comment_jobs_for_session(session_id):
         comment_job.export_path = rewrite_stored_path(staged, comment_job.export_path)
 
 
 async def _retitle_finished_segments(
-    repo: Repository, root: Path, session_id: int, job_id: int, title: str
-) -> list[StagedRetitle]:
-    """閉じたセグメントの「無題」を配信タイトルへ付け直す。文字起こし中のファイルは動かさない。"""
-    staged_all: list[StagedRetitle] = []
-    for segment in await repo.segments_for_job(job_id):
+    repo: Repository,
+    root: Path,
+    session_id: int,
+    job_id: int,
+    title: str,
+    sink: list[StagedRetitle],
+) -> None:
+    """閉じたセグメントの「無題」を配信タイトルへ付け直す。文字起こし中のファイルは動かさない。
+
+    呼び出し側は配信行をロックしておく。セグメント行もロックするので、コミットまで
+    文字起こしが古いパスを取得することはない。作った名前はすぐ sink に載せる。
+    """
+    for segment in await repo.lock_segments_for_job(job_id):
         if segment.file_removed or segment.speech_status == "running" or segment.finished_at is None:
             continue
         try:
             path = resolve_stored(root, segment.file_path)
         except ValueError:
             continue
-        staged = stage_retitle(path, title)
+        staged = await _stage_retitle(path, title, sink)
         if staged is None:
             continue
-        if segment.speech_status == "pending":
-            staged.release_sources = False
         segment.file_path = rewrite_stored_path(staged, segment.file_path) or segment.file_path
         segment.speech_srt_path = rewrite_stored_path(staged, segment.speech_srt_path)
         await _point_exports_at(repo, session_id, staged)
-        staged_all.append(staged)
-    return staged_all
 
 
 async def close_recording_if_idle(
@@ -1069,11 +1132,6 @@ async def close_recording_if_idle(
                         assign_speech_queue(segment, enabled=speech_enabled, has_media=False)
                         continue
                     segment.file_path = relative_to_root(settings.recordings_dir, final.path)
-                    staged = stage_retitle(final.path, title)
-                    if staged is not None:
-                        await _point_exports_at(repo, job.stream_session_id, staged)
-                        segment.file_path = relative_to_root(settings.recordings_dir, staged.dest)
-                        open_retitles.append(staged)
                     segment.file_size = final.size
                     segment.duration_ms = final.duration_ms
                     segment.container_format = final.container
@@ -1087,10 +1145,9 @@ async def close_recording_if_idle(
                 segment.finished_at = utcnow()
                 assign_speech_queue(segment, enabled=speech_enabled, has_media=has_media)
             if title:
-                open_retitles.extend(
-                    await _retitle_finished_segments(
-                        repo, settings.recordings_dir, job.stream_session_id, job_id, title
-                    )
+                await repo.lock_session(job.stream_session_id)
+                await _retitle_finished_segments(
+                    repo, settings.recordings_dir, job.stream_session_id, job_id, title, open_retitles
                 )
             if finish and job.status not in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
                 chosen = target
@@ -1101,10 +1158,9 @@ async def close_recording_if_idle(
                     reason = None if chosen == RecordingStatus.COMPLETED else "worker restarted"
                 repo.finish_recording(job, chosen, reason)
                 await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
-            await session.commit()
-    except Exception:
+            await _commit_and_publish(session, open_retitles)
+    except BaseException:
         _release_retitles(open_retitles, publish=False)
         raise
-    _release_retitles(open_retitles, publish=True)
     for path in obsolete:
         discard_obsolete(path)

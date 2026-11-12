@@ -36,7 +36,7 @@ from live_recorder.platforms.types import LiveObservation
 from live_recorder.recording.files import resolve_stored
 from live_recorder.recording.finalize import allow_new_recording, disk_free
 from live_recorder.recording.process import command_output
-from live_recorder.speech.srt import unlink_speech_sidecar
+from live_recorder.speech.srt import stored_speech_srt, unlink_speech_sidecar
 from live_recorder.timeutil import utcnow
 from live_recorder.versions import tiktoklive_status, tool_version
 
@@ -591,35 +591,46 @@ class Supervisor:
             repo = Repository(session)
             runtime = await load_runtime(session)
             now = utcnow()
+            pending_files: list[tuple[str, str | None]] = []
             if runtime.auto_delete_enabled and runtime.retention_days > 0:
                 cutoff = now - timedelta(days=runtime.retention_days)
+                for session_id in await repo.expired_session_ids(cutoff):
+                    await repo.lock_session(session_id)
                 for segment in await repo.expired_segments(cutoff):
-                    self._unlink_recorded(segment.file_path)
+                    pending_files.append((segment.file_path, segment.speech_srt_path))
                     segment.file_removed = True
-                await repo.add_event("maintenance", "保存期限を過ぎた録画ファイルを削除しました")
+                if pending_files:
+                    await repo.add_event("maintenance", "保存期限を過ぎた録画ファイルを削除しました")
             if runtime.comment_retention_days > 0:
                 cutoff = now - timedelta(days=runtime.comment_retention_days)
+                # 配信行を先にロックしてからコメントを消す。履歴削除と同じ順にしてデッドロックを避ける。
+                for session_id in await repo.sessions_with_comments_before(cutoff):
+                    await repo.lock_session(session_id)
                 removed, session_ids = await repo.delete_comments_before(cutoff)
                 if removed:
-                    for session_id in session_ids:
+                    for session_id in sorted(session_ids):
                         await self._refresh_comment_retention(repo, session_id, runtime.display_timezone)
                     await repo.add_event(
                         "maintenance",
                         f"期限を過ぎたコメント {removed} 件と、その配信のコメント字幕を更新しました",
                     )
             await session.commit()
+        for relative, speech in pending_files:
+            self._unlink_recorded(relative, speech)
 
     async def _refresh_comment_retention(self, repo: Repository, session_id: int, tz_name: str) -> None:
-        videos: list[Path] = []
+        videos: list[tuple[Path, Path | None]] = []
+        root = self.settings.recordings_dir
         for segment in await repo.segments_for_session(session_id):
             if segment.file_removed:
                 continue
             for relative in comment_text_relatives(segment.file_path):
                 self._unlink_file(relative)
             try:
-                videos.append(resolve_stored(self.settings.recordings_dir, segment.file_path))
+                video = resolve_stored(root, segment.file_path)
             except ValueError:
                 continue
+            videos.append((video, stored_speech_srt(root, segment.speech_srt_path)))
         jobs = await repo.comment_jobs_for_session(session_id)
         for job in jobs:
             if job.export_path:
@@ -627,11 +638,13 @@ class Supervisor:
                 job.export_path = None
         if await repo.comment_count(session_id) and jobs:
             await _auto_export(self.settings, repo, session_id, jobs[-1], tz_name)
-        for video in videos:
+        for video, speech in videos:
             if not video.is_file():
                 continue
             try:
-                await asyncio.to_thread(refresh_combined_ass, video, ffprobe=self.settings.ffprobe_path)
+                await asyncio.to_thread(
+                    refresh_combined_ass, video, ffprobe=self.settings.ffprobe_path, speech_srt=speech
+                )
             except Exception:
                 log.exception("combined ass failed")
 
@@ -643,7 +656,7 @@ class Supervisor:
         if path.is_file():
             path.unlink()
 
-    def _unlink_recorded(self, relative: str) -> None:
+    def _unlink_recorded(self, relative: str, speech_relative: str | None = None) -> None:
         try:
             path = resolve_stored(self.settings.recordings_dir, relative)
         except ValueError:
@@ -651,6 +664,8 @@ class Supervisor:
         if path.is_file():
             path.unlink()
         unlink_speech_sidecar(path)
+        if speech_relative:
+            self._unlink_file(speech_relative)
         for sidecar in comment_sidecar_relatives(relative):
             self._unlink_file(sidecar)
         unlink_combined_ass(path)

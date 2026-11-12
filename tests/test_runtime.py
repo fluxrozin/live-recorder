@@ -9,6 +9,7 @@ from live_recorder.recording.finalize import (
     allow_new_recording,
     container_name,
     finalize_recording,
+    probe_file,
     remux_args,
 )
 from live_recorder.recording.process import run_process
@@ -207,6 +208,22 @@ async def test_finalize_keeps_an_older_mp4_and_remuxes_beside_it(tmp_path: Path)
     assert source.exists()
 
 
+def _tagged_probe(tmp_path: Path, marker: str) -> str:
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_text(
+        "#!/bin/sh\n"
+        "for target do :; done\n"
+        "tags=''\n"
+        f"case \"$target\" in *.mp4) tags=',\"tags\":{{\"comment\":\"{marker}\"}}' ;; esac\n"
+        "printf '%s\\n' "
+        "'{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\"}],"
+        "\"format\":{\"format_name\":\"mpegts\",\"duration\":\"1.5\"'\"$tags\"'}}'\n",
+        encoding="utf-8",
+    )
+    ffprobe.chmod(0o755)
+    return str(ffprobe)
+
+
 async def test_finalize_adopts_only_a_newer_mp4_from_this_segment(tmp_path: Path):
     source = tmp_path / "seg.ts"
     current = tmp_path / "seg.mp4"
@@ -214,12 +231,97 @@ async def test_finalize_adopts_only_a_newer_mp4_from_this_segment(tmp_path: Path
     current.write_bytes(b"R" * 2048)
     os.utime(source, (100, 100))
     os.utime(current, (200, 200))
-    ffmpeg, ffprobe = _tools(tmp_path, "#!/bin/sh\nexit 9\n")
+    ffmpeg, _ = _tools(tmp_path, "#!/bin/sh\nexit 9\n")
+    ffprobe = _tagged_probe(tmp_path, "live-recorder-source=seg.ts:2048")
     final = await finalize_recording(ffmpeg, ffprobe, source)
     assert final.path == current
     assert current.read_bytes() == b"R" * 2048
     assert final.obsolete == source
     assert source.exists()
+
+
+async def test_finalize_does_not_adopt_a_same_length_mp4_from_another_recording(tmp_path: Path):
+    source = tmp_path / "seg.ts"
+    other = tmp_path / "seg.mp4"
+    source.write_bytes(b"\x00" * 2048)
+    other.write_bytes(b"S" * 2048)
+    os.utime(source, (100, 100))
+    os.utime(other, (200, 200))
+    ffmpeg, _ = _tools(
+        tmp_path,
+        "#!/bin/sh\n"
+        "for target do :; done\n"
+        "python3 -c \"import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'F'*2048)\" \"$target\"\n",
+    )
+    ffprobe = _tagged_probe(tmp_path, "live-recorder-source=seg.ts:999")
+    final = await finalize_recording(ffmpeg, ffprobe, source)
+    assert final.path.name == "seg_2.mp4"
+    assert other.read_bytes() == b"S" * 2048
+    assert final.obsolete == source
+
+
+def test_claim_does_not_overwrite_when_hardlink_is_unavailable(tmp_path: Path, monkeypatch):
+    import errno
+
+    import live_recorder.recording.finalize as finalize
+
+    source = tmp_path / "seg.ts"
+    source.write_bytes(b"\x00" * 2048)
+    partial = tmp_path / ".remux-abc.mp4.partial"
+    partial.write_bytes(b"NEW" * 100)
+    target = tmp_path / "seg.mp4"
+    target.write_bytes(b"OLD" * 100)
+
+    def no_link(_src, _dst):
+        raise OSError(errno.EXDEV, "cross-device")
+
+    monkeypatch.setattr(finalize.os, "link", no_link)
+    claimed = finalize._claim(partial, target, source)
+    assert claimed.name == "seg_2.mp4"
+    assert claimed.read_bytes() == b"NEW" * 100
+    assert target.read_bytes() == b"OLD" * 100
+
+
+async def test_finalize_skips_a_name_held_by_another_recording(tmp_path: Path):
+    source = tmp_path / "seg.ts"
+    source.write_bytes(b"\x00" * 2048)
+    (tmp_path / "seg.mp4").write_bytes(b"K" * 2048)
+    (tmp_path / "seg_2.ts").write_bytes(b"\x00" * 2048)
+    os.utime(tmp_path / "seg.mp4", (100, 100))
+    os.utime(source, (200, 200))
+    ffmpeg, ffprobe = _tools(
+        tmp_path,
+        "#!/bin/sh\n"
+        "for target do :; done\n"
+        "python3 -c \"import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'F'*2048)\" \"$target\"\n",
+    )
+    final = await finalize_recording(ffmpeg, ffprobe, source)
+    assert final.path.name == "seg_3.mp4"
+    assert (tmp_path / "seg_2.ts").read_bytes() == b"\x00" * 2048
+
+
+async def test_finalize_marks_and_later_adopts_a_real_remux(tmp_path: Path):
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg test source is unavailable")
+    source = tmp_path / "seg.ts"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mpegts", str(source),
+        ],
+        check=True,
+    )
+    first = await finalize_recording("ffmpeg", "ffprobe", source)
+    assert first.path == tmp_path / "seg.mp4"
+    probed = await probe_file("ffprobe", first.path)
+    assert probed.source_tag == f"live-recorder-source=seg.ts:{source.stat().st_size}"
+    again = await finalize_recording("false", "ffprobe", source)
+    assert again.path == first.path
+    assert again.obsolete == source
 
 
 async def test_finalize_does_not_adopt_a_shorter_recording(tmp_path: Path):

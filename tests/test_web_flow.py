@@ -163,6 +163,35 @@ def test_pages_require_login(client):
         assert response.status_code == 303 and response.headers["location"] == "/login", path
 
 
+def test_ass_download_uses_the_stored_speech_srt(client):
+    from sqlalchemy import select
+
+    _login(client)
+    folder = client.settings.recordings_dir / "tiktok" / "live_user"
+    (folder / "seg1_Speech.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n古い字幕\n", encoding="utf-8")
+    (folder / "stored_Speech.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n記録した字幕\n", encoding="utf-8")
+
+    async def point_speech() -> int:
+        db = Database(client.settings)
+        async with db.session() as session:
+            segment = await session.scalar(
+                select(RecordingSegment).where(RecordingSegment.file_path == "tiktok/live_user/seg1.mp4")
+            )
+            segment.speech_srt_path = "tiktok/live_user/stored_Speech.srt"
+            segment.speech_status = "completed"
+            await session.commit()
+            segment_id = segment.id
+        await db.dispose()
+        return segment_id
+
+    segment_id = asyncio.run(point_speech())
+    response = client.get(f"/recordings/segments/{segment_id}/ass")
+    assert response.status_code == 200
+    body = response.content.decode("utf-8-sig")
+    assert "記録した字幕" in body and "古い字幕" not in body
+    assert ".ass" in response.headers["content-disposition"]
+
+
 def test_pages_render_with_real_data(client):
     _login(client)
     session_id = client.ids["session"]

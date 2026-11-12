@@ -303,19 +303,73 @@ def _sorted_comments(drafts: list[CommentDraft]) -> list[CommentDraft]:
     return sorted(drafts, key=lambda item: _comment_number(item) or 0)
 
 
-def _reached_cursor(numbers: list[int], threshold: int) -> bool:
-    """このページが前回の ID の直後まで届いている。件数が少ないだけでは届いたことにしない。"""
-    return bool(numbers) and min(numbers) <= threshold + 1
+def _page_complete(page: list[CommentDraft], total: int | None, last_total: int | None) -> bool:
+    """1ページで新着が揃ったか。満杯なら件数差に頼らずさかのぼる。"""
+    if len(page) >= _COMMENT_PAGE:
+        return False
+    if total is not None and last_total is not None:
+        return len(page) >= max(0, total - last_total)
+    return True
 
 
-def _take_newer(drafts: list[CommentDraft], threshold: int, seen: set[str], collected: list[CommentDraft]) -> None:
+def _take_newer(
+    drafts: list[CommentDraft],
+    threshold: int | None,
+    seen: set[str],
+    collected: list[CommentDraft],
+) -> None:
     for draft in drafts:
         number = _comment_number(draft)
         cid = draft.platform_comment_id or ""
-        if number is None or number <= threshold or not cid or cid in seen:
+        if number is None or not cid or cid in seen:
+            continue
+        if threshold is not None and number <= threshold:
             continue
         seen.add(cid)
         collected.append(draft)
+
+
+async def _walk_offset_pages(
+    client: TwitCastingClient,
+    movie_id: str,
+    *,
+    threshold: int | None,
+    seed: list[CommentDraft],
+    seed_total: int | None,
+    max_pages: int,
+    start_offset: int = 0,
+) -> tuple[list[CommentDraft], int | None, str | None, bool]:
+    """offset でさかのぼり、threshold 以下の ID か空ページに当たるまで集める。"""
+    collected: list[CommentDraft] = []
+    seen: set[str] = set()
+    _take_newer(seed, threshold, seen, collected)
+    newest = max((_comment_number(item) or 0 for item in collected), default=0)
+    newest_total = seed_total
+    offset = start_offset
+    reached = False
+    for _ in range(max_pages):
+        batch, batch_total, error = await client.fetch_comments(movie_id, limit=_COMMENT_PAGE, offset=offset)
+        if error:
+            return [], seed_total, error, False
+        if not batch:
+            reached = True
+            break
+        numbers = [number for number in (_comment_number(item) for item in batch) if number is not None]
+        _take_newer(batch, threshold, seen, collected)
+        if numbers and max(numbers) > newest:
+            newest = max(numbers)
+            newest_total = batch_total
+        if threshold is None:
+            if len(batch) < _COMMENT_PAGE:
+                reached = True
+                break
+        elif numbers and min(numbers) <= threshold:
+            reached = True
+            break
+        offset += len(batch)
+    if threshold is None and seed_total is not None and len(collected) >= seed_total:
+        reached = True
+    return _sorted_comments(collected), newest_total, None, not reached
 
 
 async def fetch_comments_since(
@@ -323,57 +377,44 @@ async def fetch_comments_since(
     movie_id: str,
     last_id: str | None,
     *,
+    last_total: int | None = None,
     max_pages: int = _MAX_COMMENT_PAGES,
 ) -> tuple[list[CommentDraft], int | None, str | None, bool]:
     """last_id より新しいコメントを id 順で返す。
 
+    last_total は前回の all_count。カーソルが無い初回でも、件数差から取りこぼしを検知する。
+    2つ目は、返したうち最も新しいコメントと同じ応答の all_count。
     4つ目が True のときは、上限までさかのぼっても前回の ID に届かなかった。
     エラーのときは空を返し、呼び出し側はカーソルを進めない。
-    最初の取得（last_id が無いとき）は最新の1ページだけで、過去は埋めない。
     """
     if last_id is None:
         drafts, total, error = await client.fetch_comments(movie_id, limit=_COMMENT_PAGE)
         if error:
             return [], total, error, False
-        return _sorted_comments(drafts), total, None, False
+        # 本当の初回は最新1ページだけ。空ポーリング後（last_total あり）だけ件数差でさかのぼる。
+        if last_total is None or _page_complete(drafts, total, last_total):
+            return _sorted_comments(drafts), total, None, False
+        return await _walk_offset_pages(
+            client,
+            movie_id,
+            threshold=None,
+            seed=drafts,
+            seed_total=total,
+            max_pages=max_pages,
+            start_offset=len(drafts),
+        )
 
     page, total, error = await client.fetch_comments(movie_id, slice_id=last_id, limit=_COMMENT_PAGE)
     if error:
         return [], total, error, False
-    if not str(last_id).isdigit():
+    if not str(last_id).isdigit() or not page or _page_complete(page, total, last_total):
         return _sorted_comments(page), total, None, False
 
-    threshold = int(last_id)
-    page_numbers = [number for number in (_comment_number(item) for item in page) if number is not None]
-    if not page or _reached_cursor(page_numbers, threshold):
-        return _sorted_comments(page), total, None, False
-
-    collected: list[CommentDraft] = []
-    seen: set[str] = set()
-    _take_newer(page, threshold, seen, collected)
-    offset = 0
-    reached = False
-    hole = False
-    pages = 0
-    previous_min = min(page_numbers) if page_numbers else None
-    while pages < max_pages:
-        batch, total, error = await client.fetch_comments(movie_id, limit=_COMMENT_PAGE, offset=offset)
-        pages += 1
-        if error:
-            return [], total, error, False
-        if not batch:
-            reached = True
-            break
-        numbers = [number for number in (_comment_number(item) for item in batch) if number is not None]
-        if numbers and previous_min is not None and max(numbers) < previous_min - 1:
-            hole = True
-        if numbers:
-            previous_min = min(numbers)
-        _take_newer(batch, threshold, seen, collected)
-        if numbers and min(numbers) <= threshold:
-            reached = True
-            break
-        if len(batch) < _COMMENT_PAGE:
-            break
-        offset += len(batch)
-    return _sorted_comments(collected), total, None, hole or not reached
+    return await _walk_offset_pages(
+        client,
+        movie_id,
+        threshold=int(last_id),
+        seed=page,
+        seed_total=total,
+        max_pages=max_pages,
+    )

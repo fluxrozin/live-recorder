@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
+import os
 import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from live_recorder.recording.files import stem_taken
+
 log = logging.getLogger(__name__)
+_SOURCE_TAG = "live-recorder-source="
 
 
 @dataclass(frozen=True)
@@ -18,6 +23,7 @@ class Probe:
     size: int
     has_media: bool
     video_codec: str | None
+    source_tag: str | None = None
 
 
 def container_name(format_name: str | None) -> str | None:
@@ -73,6 +79,8 @@ async def probe_file(ffprobe: str, path: Path) -> Probe:
             duration_ms = int(float(duration) * 1000)
         except (TypeError, ValueError):
             duration_ms = None
+    tags = fmt.get("tags") if isinstance(fmt.get("tags"), dict) else {}
+    comment = next((value for key, value in tags.items() if str(key).lower() == "comment"), None)
     return Probe(
         has_media and size > 1024,
         container,
@@ -80,7 +88,13 @@ async def probe_file(ffprobe: str, path: Path) -> Probe:
         size,
         has_media,
         _video_codec(streams),
+        comment if isinstance(comment, str) else None,
     )
+
+
+def source_marker(source: Path) -> str:
+    """詰め直した MP4 に残す、元の TS の名前と大きさ。"""
+    return f"{_SOURCE_TAG}{source.name}:{source.stat().st_size}"
 
 
 async def _ffprobe_json(ffprobe: str, path: Path) -> str:
@@ -107,7 +121,13 @@ async def _ffprobe_json(ffprobe: str, path: Path) -> str:
     return out.decode("utf-8", errors="replace")
 
 
-def remux_args(ffmpeg: str, source: Path, target: Path, video_codec: str | None) -> list[str]:
+def remux_args(
+    ffmpeg: str,
+    source: Path,
+    target: Path,
+    video_codec: str | None,
+    marker: str | None = None,
+) -> list[str]:
     args = [
         ffmpeg,
         "-hide_banner",
@@ -122,15 +142,23 @@ def remux_args(ffmpeg: str, source: Path, target: Path, video_codec: str | None)
     # TikTok の FLV は HEVC。MP4 の既定タグ hev1 だと再生できないプレーヤーがある。
     if video_codec == "hevc":
         args.extend(["-tag:v", "hvc1"])
+    if marker:
+        args.extend(["-metadata", f"comment={marker}"])
     args.extend(["-movflags", "+faststart", "-f", "mp4", str(target)])
     return args
 
 
-async def remux_to_mp4(ffmpeg: str, source: Path, target: Path, video_codec: str | None = None) -> bool:
+async def remux_to_mp4(
+    ffmpeg: str,
+    source: Path,
+    target: Path,
+    video_codec: str | None = None,
+    marker: str | None = None,
+) -> bool:
     import asyncio
 
     proc = await asyncio.create_subprocess_exec(
-        *remux_args(ffmpeg, source, target, video_codec),
+        *remux_args(ffmpeg, source, target, video_codec, marker),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -181,20 +209,45 @@ def _written_after(source: Path, target: Path) -> bool:
         return False
 
 
-def _same_span(source_ms: int | None, other_ms: int | None) -> bool:
-    """長さが近いときだけ、既存の MP4 をこの TS の詰め直し結果とみなす。"""
-    if source_ms is None or other_ms is None or source_ms <= 0 or other_ms <= 0:
-        return False
-    return abs(source_ms - other_ms) <= max(500, int(source_ms * 0.02))
-
-
 def _free_mp4(source: Path) -> Path:
+    """他の録画の TS や MP4 と幹が重ならない別名。"""
     counter = 2
     while counter < 1000:
         candidate = source.with_name(_mp4_name(source.stem, counter))
-        if not candidate.exists():
+        if not stem_taken(candidate):
             return candidate
         counter += 1
+    raise OSError(f"空きの MP4 名がありません: {source.name}")
+
+
+def _claim(partial: Path, target: Path, source: Path) -> Path:
+    """詰め直した結果を、既存のファイルを上書きせずに置く。"""
+    for _ in range(1000):
+        try:
+            os.link(partial, target)
+        except FileExistsError:
+            target = _free_mp4(source)
+            continue
+        except OSError as exc:
+            if exc.errno not in {errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK}:
+                raise
+            try:
+                reserved = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                target = _free_mp4(source)
+                continue
+            os.close(reserved)
+            temporary = remux_partial_path(source)
+            try:
+                os.replace(partial, temporary)
+                temporary.replace(target)
+            except OSError:
+                temporary.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
+                raise
+            return target
+        partial.unlink(missing_ok=True)
+        return target
     raise OSError(f"空きの MP4 名がありません: {source.name}")
 
 
@@ -213,17 +266,18 @@ async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFi
     preferred = source.with_name(_mp4_name(source.stem, None))
     if preferred.is_file() and preferred.stat().st_size == 0 and preferred.resolve() != source.resolve():
         preferred.unlink()
-    # 落ちた直後の詰め直しだけを採用する。古い同名 MP4 は別の録画なので残す。
+    marker = source_marker(source)
+    # この TS から作った印のある MP4 だけを採用する。印の無い同名 MP4 は別の録画なので残す。
     if preferred.is_file() and preferred.resolve() != source.resolve() and _written_after(source, preferred):
         checked = await probe_file(ffprobe, preferred)
-        if checked.ok and _same_span(probed.duration_ms, checked.duration_ms):
+        if checked.ok and checked.source_tag == marker:
             return FinalFile(
                 preferred, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, source
             )
     target = preferred if not preferred.exists() else _free_mp4(source)
     partial = remux_partial_path(source)
     partial.unlink(missing_ok=True)
-    remuxed = await remux_to_mp4(ffmpeg, source, partial, probed.video_codec)
+    remuxed = await remux_to_mp4(ffmpeg, source, partial, probed.video_codec, marker)
     if not remuxed:
         partial.unlink(missing_ok=True)
         status = "ok" if probed.ok else "partial"
@@ -233,7 +287,11 @@ async def finalize_recording(ffmpeg: str, ffprobe: str, source: Path) -> FinalFi
         partial.unlink(missing_ok=True)
         status = "ok" if probed.ok else "partial"
         return FinalFile(source, probed.container, probed.duration_ms, probed.size, status, True)
-    partial.replace(target)
+    try:
+        target = _claim(partial, target, source)
+    except OSError:
+        partial.unlink(missing_ok=True)
+        raise
     obsolete = None if target.resolve() == source.resolve() else source
     return FinalFile(target, checked.container or "mp4", checked.duration_ms, checked.size, "ok", True, obsolete)
 

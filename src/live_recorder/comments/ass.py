@@ -166,14 +166,22 @@ def render_ass(
     return "\n".join(lines)
 
 
+_BY_VIDEO_NAME = object()
+
+
 def refresh_combined_ass(
     video: Path,
     *,
     ffprobe: str = "ffprobe",
     play_size: tuple[int, int] | None = None,
+    speech_srt: Path | None | object = _BY_VIDEO_NAME,
 ) -> Path | None:
-    """隣の SRT から同名の ASS を作り直す。両方空なら既存ファイルを消して None を返す。"""
-    speech = read_speech_cues(speech_srt_path(video))
+    """隣の SRT から同名の ASS を作り直す。両方空なら既存ファイルを消して None を返す。
+
+    speech_srt を渡すと、動画名から探さずにその音声字幕を使う。None なら音声字幕なし。
+    """
+    source = speech_srt_path(video) if speech_srt is _BY_VIDEO_NAME else speech_srt
+    speech = read_speech_cues(source) if isinstance(source, Path) else []
     comments = comment_cues(video)
     target = combined_ass_path(video)
     if not speech and not comments:

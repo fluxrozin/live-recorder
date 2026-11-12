@@ -1,4 +1,6 @@
+import asyncio
 import os
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import text
@@ -6,14 +8,15 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from live_recorder.config import Settings
 from live_recorder.db.base import Base
-from live_recorder.db.models import Streamer
+from live_recorder.db.models import RecordingSegment, Streamer
 from live_recorder.db.repository import Repository
 from live_recorder.db.session import Database
-from live_recorder.domain.enums import LiveStatus
+from live_recorder.domain.enums import LiveStatus, RecordingStatus
+from live_recorder.monitor.jobs import close_recording_if_idle
 from live_recorder.monitor.planner import plan_observation
 from live_recorder.monitor.supervisor import Supervisor
 from live_recorder.platforms.twitcasting import TwitCastingClient
-from live_recorder.platforms.types import LiveObservation
+from live_recorder.platforms.types import CommentDraft, LiveObservation
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LIVE_RECORDER_TEST_DATABASE_URL"),
@@ -378,4 +381,144 @@ async def test_comment_retention_keeps_speech_and_video(tmp_path, monkeypatch):
     assert video.read_bytes() == b"video"
     assert speech.is_file()
     assert not comments.is_file()
+    await db.dispose()
+
+
+_UNTITLED = "tiktok_@lock_user_20261112_080415_無題_seg01.mp4"
+
+
+async def _recording(tmp_path, monkeypatch) -> tuple[Database, int, int, int]:
+    await _reset_schema()
+    (tmp_path / "rec").mkdir()
+    (tmp_path / "cfg").mkdir()
+    settings = _settings(tmp_path)
+    db = Database(settings)
+    monkeypatch.setattr(Supervisor, "_spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr("live_recorder.monitor.supervisor.disk_free", lambda _path: 10**12)
+    monkeypatch.setattr("live_recorder.monitor.supervisor.allow_new_recording", lambda _free, _minimum: True)
+    supervisor = Supervisor(settings, db, TwitCastingClient(client_id="", client_secret="", access_token=""))
+    observation = LiveObservation(status=LiveStatus.LIVE, platform_stream_id="room-1", title="公開")
+    streamer_id = await _streamer(db, "lock_user", recording=True, comments=True)
+    await supervisor.apply(streamer_id, observation, _plan())
+    (tmp_path / "rec" / _UNTITLED).write_bytes(b"video")
+    async with db.session() as session:
+        repo = Repository(session)
+        stream = await repo.open_session(streamer_id)
+        job = await repo.active_recording(stream.id)
+        segment = RecordingSegment(
+            recording_job_id=job.id,
+            segment_number=1,
+            started_at=datetime(2026, 11, 12, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 11, 12, 1, tzinfo=timezone.utc),
+            file_path=_UNTITLED,
+            file_size=5,
+            duration_ms=1000,
+            validation_status="ok",
+            speech_status="pending",
+        )
+        session.add(segment)
+        await session.commit()
+        return db, stream.id, job.id, segment.id
+
+
+async def test_session_lock_lets_comments_in_but_hides_segments_from_speech(tmp_path, monkeypatch):
+    db, session_id, job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    async with db.session() as holder:
+        repo = Repository(holder)
+        assert await repo.lock_session(session_id) is not None
+        assert [item.id for item in await repo.lock_segments_for_job(job_id)] == [segment_id]
+        async with db.session() as writer:
+            other = Repository(writer)
+            draft = CommentDraft("c1", "u", "n", "hello", None, datetime.now(timezone.utc))
+            rows = await other.comment_rows(
+                session_id=session_id, recording_started=None, stream_started=None, drafts=[draft]
+            )
+            assert await asyncio.wait_for(other.insert_comments(rows), 5) == 1
+            await asyncio.wait_for(writer.commit(), 5)
+        async with db.session() as speech:
+            assert await Repository(speech).claim_next_speech() is None
+        await holder.commit()
+    async with db.session() as speech:
+        claimed = await Repository(speech).claim_next_speech()
+        assert claimed is not None and claimed.id == segment_id
+    await db.dispose()
+
+
+async def test_closing_retitles_a_pending_segment_and_drops_the_old_name(tmp_path, monkeypatch):
+    db, _session_id, job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    settings = _settings(tmp_path)
+    await close_recording_if_idle(settings, db, job_id, RecordingStatus.COMPLETED)
+    renamed = "tiktok_@lock_user_20261112_080415_公開_seg01.mp4"
+    assert (tmp_path / "rec" / renamed).read_bytes() == b"video"
+    assert not (tmp_path / "rec" / _UNTITLED).exists()
+    async with db.session() as session:
+        segment = await Repository(session).get_segment(segment_id)
+        assert segment.file_path == renamed
+        assert segment.speech_status == "pending"
+    await db.dispose()
+
+
+async def test_comment_retention_and_history_delete_do_not_deadlock(tmp_path, monkeypatch):
+    from sqlalchemy import text
+
+    from live_recorder.db.models import Comment, CommentCollectionJob
+
+    db, session_id, _job_id, _segment_id = await _recording(tmp_path, monkeypatch)
+    video = tmp_path / "rec" / _UNTITLED
+    async with db.session() as session:
+        session.add(
+            CommentCollectionJob(
+                stream_session_id=session_id, status="COMPLETED", received_count=3, stored_count=3
+            )
+        )
+        for index in range(3):
+            session.add(
+                Comment(
+                    stream_session_id=session_id,
+                    platform_user_id="v",
+                    nickname="n",
+                    message=f"m{index}",
+                    received_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                    dedupe_key=f"old-{index}",
+                )
+            )
+        await session.commit()
+        await session.execute(text("UPDATE comments SET created_at = NOW() - INTERVAL '10 days'"))
+        await session.commit()
+
+    results: dict[str, object] = {}
+
+    async def retain():
+        try:
+            async with db.session() as session:
+                repo = Repository(session)
+                cutoff = datetime.now(timezone.utc)
+                for sid in await repo.sessions_with_comments_before(cutoff):
+                    await repo.lock_session(sid)
+                removed, _ids = await repo.delete_comments_before(cutoff)
+                results["removed"] = removed
+                await asyncio.sleep(0.05)
+                await asyncio.wait_for(session.commit(), 5)
+                results["retain"] = "ok"
+        except Exception as exc:
+            results["retain"] = type(exc).__name__
+
+    async def delete_history():
+        try:
+            await asyncio.sleep(0.02)
+            async with db.session() as session:
+                repo = Repository(session)
+                assert await asyncio.wait_for(repo.lock_session(session_id), 5) is not None
+                await asyncio.wait_for(repo.delete_session(session_id), 5)
+                await asyncio.wait_for(session.commit(), 5)
+                results["delete"] = "ok"
+        except Exception as exc:
+            results["delete"] = type(exc).__name__
+
+    await asyncio.wait_for(asyncio.gather(retain(), delete_history()), 10)
+    assert results["retain"] == "ok"
+    assert results["delete"] == "ok"
+    assert video.is_file()
+    async with db.session() as session:
+        assert await Repository(session).get_session(session_id) is None
     await db.dispose()

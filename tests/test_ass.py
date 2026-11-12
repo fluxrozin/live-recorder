@@ -132,3 +132,20 @@ def test_refresh_writes_bom_and_removes_empty_file(tmp_path: Path):
     video.with_name(comment_export_name(video.name)).unlink()
     assert refresh_combined_ass(video, play_size=(1080, 1920)) is None
     assert not written.exists()
+
+
+def test_refresh_reads_the_stored_speech_srt_instead_of_the_video_name(tmp_path: Path):
+    video = tmp_path / "live.mp4"
+    video.write_bytes(b"not a video")
+    _write_srt(speech_srt_path(video), [(0, 1_000, "古い名前の字幕")])
+    stored = tmp_path / "stored_Speech.srt"
+    _write_srt(stored, [(0, 1_000, "DBの字幕")])
+    body = refresh_combined_ass(video, play_size=(1080, 1920), speech_srt=stored).read_text(
+        encoding="utf-8-sig"
+    )
+    assert "DBの字幕" in body and "古い名前の字幕" not in body
+    _write_srt(video.with_name(comment_export_name(video.name)), [(0, 5_000, "視聴者: こんにちは")])
+    body = refresh_combined_ass(video, play_size=(1080, 1920), speech_srt=None).read_text(
+        encoding="utf-8-sig"
+    )
+    assert "古い名前の字幕" not in body and "こんにちは" in body

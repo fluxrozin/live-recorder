@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,86 @@ def test_retitle_keeps_a_sidecar_when_the_destination_is_another_file(tmp_path: 
     assert rewrite_stored_path(staged, stored) == stored
     assert speech.read_text(encoding="utf-8") == "ours"
     assert other.read_text(encoding="utf-8") == "theirs"
+
+
+async def test_stage_retitle_keeps_work_when_the_waiter_is_cancelled(tmp_path: Path, monkeypatch):
+    import asyncio
+    import time
+
+    import live_recorder.monitor.jobs as jobs
+    from live_recorder.monitor.jobs import _release_retitles, _stage_retitle
+
+    video = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01.mp4"
+    video.write_bytes(b"video")
+    sink = []
+    started = asyncio.Event()
+    real = jobs.stage_retitle
+
+    def slow(path, title):
+        started.set()
+        time.sleep(0.2)
+        return real(path, title)
+
+    monkeypatch.setattr(jobs, "stage_retitle", slow)
+    task = asyncio.create_task(_stage_retitle(video, "ゲスト出勤", sink))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(sink) == 1
+    assert sink[0].dest.is_file() and video.is_file()
+    _release_retitles(sink, publish=False)
+    assert video.is_file()
+    assert not (tmp_path / "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01.mp4").exists()
+
+
+def test_retitle_never_overwrites_a_name_taken_after_the_check(tmp_path: Path, monkeypatch):
+    import live_recorder.recording.retitle as retitle
+
+    video = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01.mp4"
+    video.write_bytes(b"ours")
+    dest = tmp_path / "tiktok_@9ri_pi_20261112_080415_ゲスト出勤_seg01.mp4"
+    real_link = os.link
+
+    def racing_link(src, dst):
+        if Path(dst) == dest:
+            Path(dst).write_bytes(b"theirs")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(retitle.os, "link", racing_link)
+    assert retitle.stage_retitle(video, "ゲスト出勤") is None
+    assert dest.read_bytes() == b"theirs"
+    assert video.read_bytes() == b"ours"
+
+
+def test_retitle_copy_fallback_tracks_a_failed_copy(tmp_path: Path, monkeypatch):
+    import errno
+
+    import live_recorder.recording.retitle as retitle
+
+    video = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01.mp4"
+    video.write_bytes(b"video")
+    speech = tmp_path / "tiktok_@9ri_pi_20261112_080415_無題_seg01_Speech.srt"
+    speech.write_text("speech", encoding="utf-8")
+
+    def no_link(src, dst):
+        raise OSError(errno.EXDEV, "cross-device")
+
+    def broken_copy(src, dst, **_kwargs):
+        Path(dst).write_bytes(b"half")
+        if Path(src) == video:
+            raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(retitle.os, "link", no_link)
+    monkeypatch.setattr(retitle.shutil, "copy2", broken_copy)
+    assert retitle.stage_retitle(video, "ゲスト出勤") is None
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([video.name, speech.name])
+
+    monkeypatch.setattr(retitle.shutil, "copy2", lambda src, dst, **_kw: Path(dst).write_bytes(Path(src).read_bytes()))
+    staged = retitle.stage_retitle(video, "ゲスト出勤")
+    assert staged is not None and staged.dest.read_bytes() == b"video"
+    retitle.publish_retitle(staged)
+    assert not video.exists() and not speech.exists()
 
 
 def test_retitle_does_not_share_a_stem_with_an_open_ts(tmp_path: Path):
@@ -527,7 +608,7 @@ async def test_comments_since_backfills_when_a_page_is_full():
     assert pages.calls == [("100", None), (None, 0), (None, 50)]
 
 
-async def test_comments_since_walks_a_short_page_that_misses_the_cursor():
+async def test_comments_since_walks_a_short_page_when_the_count_says_more():
     from live_recorder.platforms.twitcasting import fetch_comments_since
 
     class Short:
@@ -543,27 +624,117 @@ async def test_comments_since_walks_a_short_page_that_misses_the_cursor():
             return [_comment(item) for item in page], 180, None
 
     pages = Short()
-    drafts, _, error, truncated = await fetch_comments_since(pages, "55", "100")
-    assert error is None and truncated is False
+    drafts, total, error, truncated = await fetch_comments_since(pages, "55", "100", last_total=100)
+    assert error is None and truncated is False and total == 180
     assert [int(item.platform_comment_id) for item in drafts] == list(range(101, 181))
-    assert pages.calls[0] == ("100", None)
+    assert pages.calls == [("100", None), (None, 0), (None, 50)]
+
+
+class _SparsePages:
+    """ID は全配信で共有され、1コメントごとに数百〜数千飛ぶ。"""
+
+    def __init__(self, count: int):
+        self.calls = []
+        self.all_ids = [1_000_000 + 997 * index for index in range(count, 0, -1)]
+
+    async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+        self.calls.append((slice_id, offset))
+        total = len(self.all_ids)
+        if slice_id is not None:
+            newer = [item for item in self.all_ids if item > int(slice_id)]
+            return [_comment(item) for item in newer[:limit]], total, None
+        start = 0 if offset is None else offset
+        return [_comment(item) for item in self.all_ids[start : start + limit]], total, None
+
+
+@pytest.mark.parametrize("new", [5, 49])
+async def test_sparse_ids_finish_in_one_request_when_the_count_matches(new: int):
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    pages = _SparsePages(200)
+    cursor = pages.all_ids[new]
+    drafts, total, error, truncated = await fetch_comments_since(
+        pages, "55", str(cursor), last_total=200 - new
+    )
+    assert error is None and truncated is False and total == 200
+    assert [int(item.platform_comment_id) for item in drafts] == sorted(pages.all_ids[:new])
+    assert pages.calls == [(str(cursor), None)]
+
+
+async def test_sparse_ids_walk_when_a_full_page_matches_the_count():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    pages = _SparsePages(200)
+    cursor = pages.all_ids[50]
+    drafts, total, error, truncated = await fetch_comments_since(
+        pages, "55", str(cursor), last_total=150
+    )
+    assert error is None and truncated is False and total == 200
+    assert [int(item.platform_comment_id) for item in drafts] == sorted(pages.all_ids[:50])
+    assert pages.calls[0] == (str(cursor), None)
     assert (None, 0) in pages.calls
 
 
-async def test_comments_since_marks_a_hole_between_pages():
+async def test_sparse_ids_backfill_every_new_comment_without_a_gap():
     from live_recorder.platforms.twitcasting import fetch_comments_since
 
-    class Hole:
-        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
-            if slice_id is not None or offset in (None, 0):
-                return [_comment(item) for item in range(200, 150, -1)], 200, None
-            return [_comment(item) for item in range(120, 70, -1)], 200, None
+    pages = _SparsePages(200)
+    cursor = pages.all_ids[80]
+    drafts, total, error, truncated = await fetch_comments_since(pages, "55", str(cursor), last_total=120)
+    assert error is None and truncated is False and total == 200
+    assert [int(item.platform_comment_id) for item in drafts] == sorted(pages.all_ids[:80])
+    assert pages.calls == [(str(cursor), None), (None, 0), (None, 50)]
 
-    drafts, _, error, truncated = await fetch_comments_since(Hole(), "55", "50")
-    assert error is None and truncated is True
+
+async def test_empty_first_poll_then_burst_backfills_without_a_silent_gap():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    class Burst:
+        def __init__(self):
+            self.n = 0
+            self.calls = []
+
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            self.calls.append((slice_id, offset))
+            self.n += 1
+            if self.n == 1:
+                return [], 0, None
+            ids = list(range(80, 0, -1))
+            if slice_id is not None:
+                newer = [item for item in ids if item > int(slice_id)]
+                return [_comment(item) for item in newer[:limit]], 80, None
+            start = 0 if offset is None else offset
+            return [_comment(item) for item in ids[start : start + limit]], 80, None
+
+    pages = Burst()
+    first, total, error, truncated = await fetch_comments_since(pages, "55", None, last_total=None)
+    assert first == [] and total == 0 and truncated is False and error is None
+    drafts, total, error, truncated = await fetch_comments_since(pages, "55", None, last_total=0)
+    assert error is None and truncated is False and total == 80
+    assert [int(item.platform_comment_id) for item in drafts] == list(range(1, 81))
+    assert pages.calls == [(None, None), (None, None), (None, 50)]
+
+
+async def test_count_drop_from_deletions_still_walks_a_full_page():
+    from live_recorder.platforms.twitcasting import fetch_comments_since
+
+    class Pages:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
+            self.calls.append((slice_id, offset))
+            # 削除で件数差は 49 だが、新着は 52。満杯ページは必ずさかのぼる。
+            if slice_id is not None:
+                return [_comment(item) for item in range(152, 102, -1)], 149, None
+            start = 0 if offset is None else offset
+            page = list(range(152, 100, -1))[start : start + limit]
+            return [_comment(item) for item in page], 149, None
+
+    drafts, total, error, truncated = await fetch_comments_since(Pages(), "55", "100", last_total=100)
+    assert error is None and truncated is False and total == 149
     ids = [int(item.platform_comment_id) for item in drafts]
-    assert 151 in ids and 120 in ids
-    assert 140 not in ids
+    assert 101 in ids and 102 in ids and 152 in ids
 
 
 async def test_comments_since_keeps_a_short_page_without_walking_history():
@@ -602,7 +773,7 @@ async def test_comments_since_drops_nothing_into_the_cursor_when_backfill_fails(
     assert drafts == [] and error == "rate_limited" and truncated is False
 
 
-async def test_truncated_comment_walk_retries_the_same_cursor():
+async def test_truncated_comment_walk_moves_on_and_records_one_gap():
     import asyncio
 
     from live_recorder.monitor.jobs import _collect_twitcasting
@@ -617,6 +788,8 @@ async def test_truncated_comment_walk_retries_the_same_cursor():
         async def add(self, _draft):
             return None
 
+    pages = _SparsePages(3000)
+
     class Fake:
         def __init__(self):
             self.slices: list[str | None] = []
@@ -624,21 +797,124 @@ async def test_truncated_comment_walk_retries_the_same_cursor():
         async def fetch_comments(self, movie_id, *, slice_id=None, limit=50, offset=None):
             self.slices.append(slice_id)
             if slice_id is None and offset is None:
-                return [_comment(1)], 1, None
-            if slice_id == "1":
-                if self.slices.count("1") >= 2:
-                    stop.set()
-                return [_comment(item) for item in range(80, 30, -1)], 80, None
-            return [_comment(item) for item in range(10, 0, -1)], 80, None
+                return [_comment(pages.all_ids[-1])], 1, None
+            if slice_id is not None and slice_id != str(pages.all_ids[-1]):
+                stop.set()
+                return [], len(pages.all_ids), None
+            return await pages.fetch_comments(movie_id, slice_id=slice_id, limit=limit, offset=offset)
 
     fake = Fake()
+    gaps: list[str] = []
 
-    async def on_gap(_reason: str) -> None:
-        return None
+    async def on_gap(reason: str) -> None:
+        gaps.append(reason)
 
     outcome = await asyncio.wait_for(_collect_twitcasting(fake, "55", stop, Sink(), 0, on_gap), 2)
     assert outcome == "stopped"
-    assert fake.slices.count("1") >= 2
+    slices = [item for item in fake.slices if item is not None]
+    assert slices == [str(pages.all_ids[-1]), str(pages.all_ids[0])]
+    assert gaps == ["comments_page_truncated"]
+
+
+class _TikTokSink:
+    def __init__(self):
+        self.items: list[str] = []
+        self.reconnects = 0
+        self.max_reconnects = 5
+
+    async def add(self, draft):
+        self.items.append(draft.message)
+
+
+class _LiveChecks:
+    async def check(self, _user_id):
+        from types import SimpleNamespace
+
+        from live_recorder.platforms.types import LiveStatus
+
+        return SimpleNamespace(status=LiveStatus.LIVE, error=None)
+
+    def block_remaining(self) -> float:
+        return 0.0
+
+
+def _fake_tiktok(monkeypatch, rooms: list[str]):
+    """接続ごとに、部屋の確認が終わる前にコメントを1件流す TikTokLive の代わり。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from TikTokLive.events import CommentEvent, ConnectEvent
+
+    class Client:
+        def __init__(self, unique_id):
+            self.handlers = {}
+            self.room_info = None
+            self.attempt = 0
+
+        def on(self, event_type):
+            def register(handler):
+                self.handlers[event_type] = handler
+                return handler
+
+            return register
+
+        async def connect(self, fetch_room_info=True):
+            room = rooms[self.attempt]
+            self.attempt += 1
+            checking = asyncio.create_task(self.handlers[ConnectEvent](SimpleNamespace(room_id=room)))
+            await asyncio.sleep(0)
+            await self.handlers[CommentEvent](SimpleNamespace(content=f"{room}-early", user=None, common=None))
+            await checking
+            await self.handlers[CommentEvent](SimpleNamespace(content=f"{room}-late", user=None, common=None))
+            error = ConnectionError("dropped")
+            error.retry_after = 0.01
+            raise error
+
+        async def disconnect(self):
+            return None
+
+    monkeypatch.setattr("TikTokLive.TikTokLiveClient", Client)
+
+
+async def test_tiktok_holds_comments_until_each_connection_is_checked(monkeypatch):
+    import asyncio
+
+    from live_recorder.monitor.jobs import _collect_tiktok
+
+    _fake_tiktok(monkeypatch, ["r1", "r2", "r2"])
+    stop = asyncio.Event()
+    sink = _TikTokSink()
+
+    async def on_room(room_id, _info):
+        await asyncio.sleep(0.01)
+        return room_id == "r1"
+
+    outcome = await asyncio.wait_for(
+        _collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks()), 2
+    )
+    assert outcome == "stopped"
+    assert sink.items == ["r1-early", "r1-late"]
+
+
+async def test_tiktok_room_check_failure_does_not_drop_comments(monkeypatch):
+    import asyncio
+
+    from live_recorder.monitor.jobs import _collect_tiktok
+
+    _fake_tiktok(monkeypatch, ["r1", "r1"])
+    stop = asyncio.Event()
+    sink = _TikTokSink()
+
+    async def on_room(_room_id, _info):
+        if sink.items:
+            stop.set()
+        raise RuntimeError("db down")
+
+    outcome = await asyncio.wait_for(
+        _collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks()), 2
+    )
+    assert outcome == "stopped"
+    assert sink.items[:2] == ["r1-early", "r1-late"]
 
 
 async def test_collect_twitcasting_backfills_without_a_tight_loop():
