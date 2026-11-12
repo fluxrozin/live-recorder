@@ -13,7 +13,6 @@ from live_recorder.speech.srt import parse_speech_srt, read_speech_cues, speech_
 _REF_W = 1080
 _REF_H = 1920
 _FALLBACK_SIZE = (_REF_W, _REF_H)
-_COMMENT_LINES = 2
 _SPEECH_STYLE = "Speech"
 _COMMENT_STYLE = "Comment"
 _SPEECH_COLOUR = "&H00FFFFFF"
@@ -36,10 +35,10 @@ def unlink_combined_ass(video: Path) -> None:
 
 
 def escape_ass(text: str) -> str:
-    """制御文字を文字として残し、改行だけを ASS の改行にする。"""
-    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = cleaned.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
-    return cleaned.replace("\n", r"\N")
+    """制御文字を文字として残し、改行は半角スペース一つにする。"""
+    lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    cleaned = " ".join(line for line in lines if line)
+    return cleaned.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
 
 def format_ass_time(ms: int) -> str:
@@ -261,15 +260,16 @@ def _comment_events(
     free = [0] * lanes
     events: list[tuple[int, int, int, str]] = []
     for index, (start, end, text) in ordered:
-        shown = _clip_lines(text)
-        plain = _plain_text(shown)
+        plain = _plain_text(text)
         if not plain or end <= start:
             continue
-        span = min(_line_count(plain), lanes)
+        placed = escape_ass(plain)
+        if not placed:
+            continue
+        span = 1
         lane = _first_open_lane(free, start, span)
         for slot in range(lane, lane + span):
             free[slot] = end
-        placed = escape_ass(plain)
         lift = base + lane * line_height
         events.append(
             (start, 1, index, _dialogue(1, start, end, _COMMENT_STYLE, r"{\an2}" + placed, margin_v=lift))
@@ -312,16 +312,6 @@ _EMOJI = re.compile(
     "\ufe0f"
     "]+"
 )
-
-
-def _clip_lines(text: str) -> str:
-    lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-    kept = [line for line in lines if line][:_COMMENT_LINES]
-    return "\n".join(kept)
-
-
-def _line_count(text: str) -> int:
-    return max(1, text.count("\n") + 1)
 
 
 def _dialogue(layer: int, start: int, end: int, style: str, text: str, margin_v: int = 0) -> str:

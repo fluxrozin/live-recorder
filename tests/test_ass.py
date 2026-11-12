@@ -9,6 +9,7 @@ from live_recorder.comments.ass import (
     refresh_combined_ass,
     render_ass,
 )
+from live_recorder.comments.export import render_srt
 from live_recorder.comments.segments import comment_export_name
 from live_recorder.speech.srt import format_srt_time, speech_srt_path
 
@@ -26,9 +27,10 @@ def test_ass_time_is_centiseconds():
     assert format_ass_time(3_661_000) == "1:01:01.00"
 
 
-def test_ass_escapes_overrides_and_keeps_newlines():
+def test_ass_escapes_overrides_and_flattens_newlines():
     assert escape_ass("a{b}\\c") == r"a\{b\}\\c"
-    assert escape_ass("上\n下") == r"上\N下"
+    assert escape_ass("上\n下") == "上 下"
+    assert escape_ass("上\r\n\n下") == "上 下"
 
 
 def test_styles_leave_the_font_blank_and_stack_comments():
@@ -44,11 +46,11 @@ def test_styles_leave_the_font_blank_and_stack_comments():
     assert "Style: Comment,,48,&H0000FFFF," in body
     assert "Yu Gothic" not in body
     assert r"今日は\{配信\}する" in body
-    assert r"\N二行目" in body
-    assert "三行目" not in body
+    assert "ユーザーB：かわいい 二行目 三行目" in body
+    assert r"\N" not in body
     assert "Dialogue: 0,0:00:01.50,0:00:05.00,Speech," in body
     margins = [int(match) for match in re.findall(r",Comment,,0,0,(\d+),,", body)]
-    assert margins == [146, 146 + 106, 146 + 106 * 3]
+    assert margins == [146, 146 + 106, 146 + 106 * 2]
     assert all(margin > 40 for margin in margins)
     speech_line = next(line for line in body.splitlines() if line.startswith("Dialogue: 0,"))
     assert r"{\an2}" in speech_line
@@ -102,6 +104,27 @@ def test_long_speech_does_not_stay_up_and_emoji_are_removed():
     assert "Dialogue: 0,0:00:00.00,0:00:02.50,Speech," in body
     assert "🐶" not in body
     assert "輝元: おはよ" in body
+
+
+def test_multiline_comment_stays_one_line_and_keeps_the_author(tmp_path: Path):
+    video = tmp_path / "live.mp4"
+    video.write_bytes(b"not a video")
+    srt = render_srt(
+        [
+            {
+                "nickname": "みるお",
+                "user_id": "miruo",
+                "message": "一\n二\n三\n四",
+                "recording_offset_ms": 0,
+            }
+        ]
+    )
+    video.with_name(comment_export_name(video.name)).write_text(srt, encoding="utf-8")
+    written = refresh_combined_ass(video, play_size=(1080, 1920))
+    assert written is not None
+    body = written.read_text(encoding="utf-8-sig")
+    assert "一 二 三 四 (みるお | @miruo)" in body
+    assert r"\N" not in body
 
 
 def test_missing_comment_srt_uses_legacy_jsonl(tmp_path: Path):
