@@ -629,6 +629,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         ),
                         "speech_empty": segment.speech_status == "completed" and not segment.speech_srt_path,
                         "speech_error": (segment.speech_error or "")[:160],
+                        "speech_started_at": segment.speech_started_at,
+                        "speech_duration_ms": segment.speech_duration_ms,
                     }
                     for segment in segments
                 ],
@@ -1620,6 +1622,8 @@ def _speech_row(segment, root: Path) -> dict:
         "speech_ready": ready,
         "speech_empty": segment.speech_status == "completed" and not segment.speech_srt_path,
         "speech_error": (segment.speech_error or "")[:160],
+        "speech_started_at": segment.speech_started_at,
+        "speech_duration_ms": segment.speech_duration_ms,
         "can_requeue": segment.finished_at is not None and segment.speech_status not in {"pending", "running"},
     }
 

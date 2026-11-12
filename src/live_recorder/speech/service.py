@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from pathlib import Path
 
 from sqlalchemy import text
@@ -19,10 +20,12 @@ from live_recorder.recording.files import relative_to_root, resolve_stored
 from live_recorder.speech.engine import load_whisper
 from live_recorder.speech.queue import (
     clip_error,
+    elapsed_ms,
     interpret_speech,
     speech_result_path,
     transcribe_video,
 )
+from live_recorder.timeutil import utcnow
 
 log = logging.getLogger(__name__)
 LOCK_KEY = 824202
@@ -61,6 +64,8 @@ async def _claim(db: Database):
             return None
         previous = segment.speech_srt_path
         segment.speech_status = "running"
+        segment.speech_started_at = utcnow()
+        segment.speech_duration_ms = None
         claimed = (
             segment.id,
             segment.file_path,
@@ -80,6 +85,7 @@ async def _finish(
     error: str | None,
     *,
     keep_path: bool,
+    duration_ms: int,
 ) -> None:
     async with db.session() as session:
         await Repository(session).finish_speech(
@@ -88,6 +94,7 @@ async def _finish(
             srt_path=srt_path,
             error=error,
             keep_path=keep_path,
+            duration_ms=duration_ms,
         )
         await session.commit()
 
@@ -117,6 +124,8 @@ async def _run(stop: asyncio.Event) -> None:
                 continue
             segment_id, relative, model_name, language, previous_srt = claimed
             video = None
+            # モデルの読み込みと文字起こし。統合字幕の作成は含めない。
+            started = time.perf_counter()
             try:
                 video = resolve_stored(settings.recordings_dir, relative)
                 if not video.is_file():
@@ -137,9 +146,10 @@ async def _run(stop: asyncio.Event) -> None:
                 )
             except Exception as exc:
                 status, produced, error = "failed", None, clip_error(exc)
+            taken_ms = elapsed_ms(started, time.perf_counter())
             if video is None:
                 kept = speech_result_path(status=status, produced=None, previous=previous_srt)
-                await _finish(db, segment_id, status, kept, error, keep_path=False)
+                await _finish(db, segment_id, status, kept, error, keep_path=False, duration_ms=taken_ms)
             else:
                 status, error = await _publish_speech(
                     db,
@@ -150,11 +160,12 @@ async def _run(stop: asyncio.Event) -> None:
                     produced,
                     error,
                     previous_srt,
+                    taken_ms,
                 )
             if status == "failed":
-                log.warning("speech segment %s failed: %s", segment_id, error)
+                log.warning("speech segment %s failed in %sms: %s", segment_id, taken_ms, error)
             else:
-                log.info("speech segment %s completed", segment_id)
+                log.info("speech segment %s completed in %sms", segment_id, taken_ms)
     finally:
         await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": LOCK_KEY})
         await connection.commit()
@@ -171,6 +182,7 @@ async def _publish_speech(
     produced: Path | None,
     error: str | None,
     previous_srt: str | None,
+    duration_ms: int,
 ) -> tuple[str, str | None]:
     """削除と同時に字幕を書き戻さないよう、配信行をロックしてから公開する。"""
     play_size = None
@@ -189,7 +201,14 @@ async def _publish_speech(
             status, produced, error, previous_srt = "failed", None, "録画は削除されました", None
         produced_relative = relative_to_root(settings.recordings_dir, produced) if produced is not None else None
         srt_relative = speech_result_path(status=status, produced=produced_relative, previous=previous_srt)
-        await repo.finish_speech(segment_id, status=status, srt_path=srt_relative, error=error, keep_path=False)
+        await repo.finish_speech(
+            segment_id,
+            status=status,
+            srt_path=srt_relative,
+            error=error,
+            keep_path=False,
+            duration_ms=duration_ms,
+        )
         if status == "completed" and not gone:
             try:
                 await asyncio.to_thread(

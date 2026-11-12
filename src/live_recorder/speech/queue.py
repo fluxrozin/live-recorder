@@ -12,6 +12,8 @@ def assign_speech_queue(segment, *, enabled: bool, has_media: bool) -> None:
     """確定直後に字幕の待ち状態を決める。録画の状態は変えない。"""
     segment.speech_error = None
     segment.speech_srt_path = None
+    segment.speech_started_at = None
+    segment.speech_duration_ms = None
     if segment.file_removed or not enabled or not has_media:
         segment.speech_status = "skipped"
         return
@@ -30,6 +32,8 @@ def requeue_speech(segment) -> str:
         return "pending"
     segment.speech_status = "pending"
     segment.speech_error = None
+    segment.speech_started_at = None
+    segment.speech_duration_ms = None
     return "queued"
 
 
@@ -38,6 +42,11 @@ def speech_result_path(*, status: str, produced: str | None, previous: str | Non
     if status == "completed":
         return produced
     return previous
+
+
+def elapsed_ms(started: float, now: float) -> int:
+    """文字起こしにかかったミリ秒。時計が戻っても負にしない。"""
+    return max(0, int((now - started) * 1000))
 
 
 def clip_error(exc: BaseException) -> str:

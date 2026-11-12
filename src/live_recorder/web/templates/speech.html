@@ -2,7 +2,7 @@
 {% set active_nav = "speech" %}
 {% block title %}音声字幕{% endblock %}
 {% block content %}
-{{ ui.page_header("音声字幕", "確定した録画を1本ずつ文字起こしします。処理状況の確認、完成した SRT のダウンロード、再生成はここから行います。") }}
+{{ ui.page_header("音声字幕", "確定した録画を1本ずつ文字起こしします。処理状況と生成時間の確認、完成した SRT のダウンロード、再生成はここから行います。") }}
 
 {%- set status_codes = ["pending", "running", "completed", "failed", "skipped", "none"] -%}
 {%- set status_labels = {"pending": "待機", "running": "処理中", "completed": "完了", "failed": "失敗", "skipped": "対象外", "none": "未設定"} -%}
@@ -67,6 +67,7 @@
           <th scope="col">録画ファイル</th>
           <th scope="col">確定</th>
           <th scope="col" class="is-num">時間</th>
+          <th scope="col" class="is-num" title="モデルの読み込みと文字起こしにかかった時間">生成</th>
           <th scope="col">状態</th>
           <th scope="col" class="is-actions"><span class="u-sr-only">操作</span></th>
         </tr>
@@ -85,6 +86,7 @@
           </td>
           <td data-label="確定" class="u-nowrap">{{ ui.time(item.finished_at, tz) }}</td>
           <td class="is-num" data-label="時間">{{ item.duration_ms|duration }}</td>
+          <td class="is-num" data-label="生成">{{ ui.speech_time(item.speech_status, item.speech_started_at, item.speech_duration_ms) }}</td>
           <td data-label="状態">
             <div class="c-table__cell-stack">
               {{ ui.status("speech", item.speech_status) }}

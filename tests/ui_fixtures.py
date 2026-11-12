@@ -311,6 +311,8 @@ def recording_detail_context(scenario: str) -> dict:
                 "speech_ready": True,
                 "speech_empty": False,
                 "speech_error": "",
+                "speech_started_at": now - timedelta(minutes=13),
+                "speech_duration_ms": 754_000,
             },
             {
                 "id": 2,
@@ -328,6 +330,8 @@ def recording_detail_context(scenario: str) -> dict:
                 "speech_ready": False,
                 "speech_empty": False,
                 "speech_error": "モデルを読み込めませんでした",
+                "speech_started_at": now - timedelta(minutes=2),
+                "speech_duration_ms": 5_000,
             },
             {
                 "id": 3,
@@ -345,6 +349,8 @@ def recording_detail_context(scenario: str) -> dict:
                 "speech_ready": False,
                 "speech_empty": False,
                 "speech_error": "",
+                "speech_started_at": None,
+                "speech_duration_ms": None,
             },
         ]
     )
@@ -705,6 +711,8 @@ def speech_context(scenario: str) -> dict:
             "speech_ready": True,
             "speech_empty": False,
             "speech_error": "",
+            "speech_started_at": now - timedelta(minutes=13),
+            "speech_duration_ms": 754_000,
             "can_requeue": True,
         },
         {
@@ -719,6 +727,8 @@ def speech_context(scenario: str) -> dict:
             "speech_ready": False,
             "speech_empty": False,
             "speech_error": "モデルを読み込めませんでした" if scenario == "normal" else "失敗理由 " * 30,
+            "speech_started_at": now - timedelta(minutes=2),
+            "speech_duration_ms": 5_000,
             "can_requeue": True,
         },
         {
@@ -733,6 +743,8 @@ def speech_context(scenario: str) -> dict:
             "speech_ready": False,
             "speech_empty": False,
             "speech_error": "",
+            "speech_started_at": now - timedelta(seconds=90),
+            "speech_duration_ms": None,
             "can_requeue": False,
         },
     ]

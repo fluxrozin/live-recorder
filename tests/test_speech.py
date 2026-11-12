@@ -7,6 +7,7 @@ from live_recorder.speech.engine import transcribe
 from live_recorder.speech.quality import SpeechCue, SpeechWord, keep_stable, refine_cue_times
 from live_recorder.speech.queue import (
     assign_speech_queue,
+    elapsed_ms,
     interpret_speech,
     requeue_speech,
     speech_result_path,
@@ -191,18 +192,27 @@ def test_speech_name_stays_within_filename_limit():
     assert first != second
 
 
+def test_elapsed_ms_counts_generation_and_never_goes_negative():
+    assert elapsed_ms(10.0, 22.5) == 12_500
+    assert elapsed_ms(10.0, 9.0) == 0
+
+
 def test_queue_does_not_change_recording_status():
     segment = SimpleNamespace(
         file_removed=False,
         speech_status=None,
         speech_error="old",
         speech_srt_path="old.srt",
+        speech_started_at="started",
+        speech_duration_ms=12_000,
         recording_status="COMPLETED",
     )
     assign_speech_queue(segment, enabled=True, has_media=True)
     assert segment.speech_status == "pending"
     assert segment.speech_error is None
     assert segment.speech_srt_path is None
+    assert segment.speech_started_at is None
+    assert segment.speech_duration_ms is None
     assert segment.recording_status == "COMPLETED"
     assign_speech_queue(segment, enabled=False, has_media=True)
     assert segment.speech_status == "skipped"
@@ -238,8 +248,12 @@ def test_requeue_keeps_existing_srt_until_a_new_result_replaces_it():
         speech_status="failed",
         speech_error="gpu failed",
         speech_srt_path="keep.srt",
+        speech_started_at="started",
+        speech_duration_ms=12_000,
     )
     assert requeue_speech(segment) == "queued"
+    assert segment.speech_started_at is None
+    assert segment.speech_duration_ms is None
     unfinished = SimpleNamespace(
         file_removed=False,
         finished_at=None,

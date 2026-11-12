@@ -125,6 +125,9 @@
               {% elif segment.speech_empty %}
               <span class="c-table__secondary">発話なし</span>
               {% endif %}
+              {% if segment.speech_status == "running" or segment.speech_duration_ms is number %}
+              <span class="c-table__secondary" title="モデルの読み込みと文字起こしにかかった時間">生成 {{ ui.speech_time(segment.speech_status, segment.speech_started_at, segment.speech_duration_ms) }}</span>
+              {% endif %}
             </div>
           </td>
           <td class="is-actions is-span is-wrap">

@@ -31,6 +31,17 @@
 {%- endif -%}
 {%- endmacro %}
 
+{# 音声字幕の生成時間。処理中は開始からの経過を、終わったあとは記録した時間を出す。 #}
+{% macro speech_time(status, started_at, duration_ms) -%}
+{%- if status == "running" and started_at -%}
+<span class="u-num" data-elapsed-since="{{ started_at|iso }}">{{ ((rendered_at - started_at).total_seconds() * 1000)|int|duration }}</span>
+{%- elif duration_ms is number -%}
+<span class="u-num">{{ duration_ms|duration }}</span>
+{%- else -%}
+<span class="u-subtle">—</span>
+{%- endif -%}
+{%- endmacro %}
+
 {% macro page_header(title, description=None, eyebrow=None) -%}
 <header class="c-page-header">
   <div class="c-page-header__text">

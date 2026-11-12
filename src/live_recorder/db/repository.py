@@ -269,6 +269,7 @@ class Repository:
         )
         for segment in rows:
             segment.speech_status = "pending"
+            segment.speech_started_at = None
 
     async def claim_next_speech(self) -> RecordingSegment | None:
         return await self.session.scalar(
@@ -296,12 +297,15 @@ class Repository:
         srt_path: str | None,
         error: str | None,
         keep_path: bool = False,
+        duration_ms: int | None = None,
     ) -> None:
         segment = await self.session.get(RecordingSegment, segment_id)
         if segment is None:
             return
         segment.speech_status = status
         segment.speech_error = error
+        if duration_ms is not None:
+            segment.speech_duration_ms = max(0, int(duration_ms))
         if not keep_path:
             segment.speech_srt_path = srt_path
 

@@ -444,6 +444,40 @@ async def test_session_lock_lets_comments_in_but_hides_segments_from_speech(tmp_
     await db.dispose()
 
 
+async def test_speech_duration_is_kept_and_a_restart_clears_the_start(tmp_path, monkeypatch):
+    db, _session_id, _job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    started = datetime(2026, 11, 13, tzinfo=timezone.utc)
+    async with db.session() as session:
+        segment = await Repository(session).get_segment(segment_id)
+        segment.speech_status = "running"
+        segment.speech_started_at = started
+        segment.speech_duration_ms = 99_000
+        await session.commit()
+    async with db.session() as session:
+        repo = Repository(session)
+        await repo.release_running_speech()
+        await session.commit()
+        segment = await repo.get_segment(segment_id)
+        assert segment.speech_status == "pending"
+        assert segment.speech_started_at is None
+        assert segment.speech_duration_ms == 99_000
+    async with db.session() as session:
+        repo = Repository(session)
+        await repo.finish_speech(
+            segment_id,
+            status="completed",
+            srt_path="keep.srt",
+            error=None,
+            duration_ms=12_500,
+        )
+        await session.commit()
+        segment = await repo.get_segment(segment_id)
+        assert segment.speech_status == "completed"
+        assert segment.speech_duration_ms == 12_500
+        assert segment.speech_srt_path == "keep.srt"
+    await db.dispose()
+
+
 async def test_closing_retitles_a_pending_segment_and_drops_the_old_name(tmp_path, monkeypatch):
     db, _session_id, job_id, segment_id = await _recording(tmp_path, monkeypatch)
     settings = _settings(tmp_path)

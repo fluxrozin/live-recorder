@@ -373,6 +373,10 @@ def test_segment_download_only_when_file_exists():
     assert "発話なし" not in html
     assert "モデルを読み込めませんでした" in html
     assert "ファイルなし" in html and "削除済み" in html
+    assert 'data-label="字幕"' in html
+    assert ">12:34</span>" in html
+    assert ">0:05</span>" in html
+    assert html.count(">生成 ") == 2
     for segment_id in (1, 2, 3):
         assert f"segment_id={segment_id}&amp;format=srt" in html
     assert re.search(
@@ -398,6 +402,11 @@ def test_speech_page_shows_queue_download_and_regenerate():
     assert 'action="/speech/retry-failed"' in html
     assert "失敗 1 件を再生成" in html
     assert "処理中" in html
+    assert "生成時間" in html
+    assert 'data-label="生成"' in html
+    assert ">12:34</span>" in html
+    assert ">0:05</span>" in html
+    assert "data-elapsed-since" in html
 
 
 def test_speech_cues_read_like_comments():
