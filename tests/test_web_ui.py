@@ -360,7 +360,8 @@ def test_segment_download_only_when_file_exists():
     assert 'href="/speech/cues?session_id=101"' in html
     assert "字幕を見る" in html
     assert "コメント (SRT)" in html
-    assert "<dt>重複</dt><dd" in html and ">19 件</dd>" in html
+    assert '<dt>受信</dt><dd>15,320 件 <span class="u-caption" title="同じコメントIDの再送です">重複 19 件</span></dd>' in html
+    assert "<dt>重複</dt>" not in html
     assert "受信 / 保存" not in html
     assert 'action="/speech/' not in html
     assert "再生成" not in html

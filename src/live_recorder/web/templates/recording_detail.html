@@ -69,8 +69,7 @@
       <dl class="c-props">
         <dt>収集状態</dt><dd>{{ ui.status("com", detail.comment_status, badge=True) }}</dd>
         <dt>保存済み</dt><dd>{{ "{:,}".format(detail.comments_total) }} 件</dd>
-        <dt>受信</dt><dd>{{ "{:,}".format(detail.comment_received) }} 件</dd>
-        <dt>重複</dt><dd title="同じコメントIDの再送です">{{ "{:,}".format(detail.comment_duplicates) }} 件</dd>
+        <dt>受信</dt><dd>{{ "{:,}".format(detail.comment_received) }} 件 <span class="u-caption" title="同じコメントIDの再送です">重複 {{ "{:,}".format(detail.comment_duplicates) }} 件</span></dd>
         <dt>失敗</dt><dd>{% if detail.comment_errors %}<span class="c-status c-status--warning">{{ ui.icon("triangle-alert") }}{{ detail.comment_errors }} 件</span>{% else %}0 件{% endif %}</dd>
         <dt>再接続</dt><dd>{{ detail.comment_reconnects }} 回</dd>
         <dt>最終受信</dt><dd>{{ ui.time(detail.comment_last_received_at, tz) }}</dd>
