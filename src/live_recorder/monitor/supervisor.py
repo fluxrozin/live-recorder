@@ -9,8 +9,8 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from live_recorder.comments.ass import refresh_combined_ass, unlink_combined_ass
-from live_recorder.comments.segments import comment_sidecar_relatives, comment_text_relatives
+from live_recorder.comments.ass import refresh_combined_ass
+from live_recorder.comments.segments import comment_text_relatives
 from live_recorder.config import Settings
 from live_recorder.db.repository import Repository
 from live_recorder.db.runtime import ensure_runtime, load_runtime
@@ -33,10 +33,11 @@ from live_recorder.monitor.planner import (
 from live_recorder.platforms.tiktok import TikTokChecks
 from live_recorder.platforms.twitcasting import TwitCastingClient
 from live_recorder.platforms.types import LiveObservation
+from live_recorder.recording.cleanup import flush_pending_deletions, queue_removed_segment_files, unlink_stored
 from live_recorder.recording.files import resolve_stored
 from live_recorder.recording.finalize import allow_new_recording, disk_free
 from live_recorder.recording.process import command_output
-from live_recorder.speech.srt import stored_speech_srt, unlink_speech_sidecar
+from live_recorder.speech.srt import stored_speech_srt
 from live_recorder.timeutil import utcnow
 from live_recorder.versions import tiktoklive_status, tool_version
 
@@ -157,6 +158,8 @@ class Supervisor:
             for job_id in ended_comments:
                 await self._finish_ended_comments(repo, job_id)
             await session.commit()
+        await queue_removed_segment_files(self.db)
+        await flush_pending_deletions(self.db, self.settings.recordings_dir)
 
     async def _finish_ended_recording(self, repo: Repository, job_id: int) -> None:
         job = await repo.get_recording_job(job_id)
@@ -595,15 +598,15 @@ class Supervisor:
             repo = Repository(session)
             runtime = await load_runtime(session)
             now = utcnow()
-            pending_files: list[tuple[str, str | None]] = []
             if runtime.auto_delete_enabled and runtime.retention_days > 0:
                 cutoff = now - timedelta(days=runtime.retention_days)
                 for session_id in await repo.expired_session_ids(cutoff):
                     await repo.lock_session(session_id)
-                for segment in await repo.expired_segments(cutoff):
-                    pending_files.append((segment.file_path, segment.speech_srt_path))
+                expired = await repo.expired_segments(cutoff)
+                for segment in expired:
+                    await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
                     segment.file_removed = True
-                if pending_files:
+                if expired:
                     await repo.add_event("maintenance", "保存期限を過ぎた録画ファイルを削除しました")
             if runtime.comment_retention_days > 0:
                 cutoff = now - timedelta(days=runtime.comment_retention_days)
@@ -619,8 +622,8 @@ class Supervisor:
                         f"期限を過ぎたコメント {removed} 件と、その配信のコメント字幕を更新しました",
                     )
             await session.commit()
-        for relative, speech in pending_files:
-            self._unlink_recorded(relative, speech)
+        await queue_removed_segment_files(self.db)
+        await flush_pending_deletions(self.db, self.settings.recordings_dir)
 
     async def _refresh_comment_retention(self, repo: Repository, session_id: int, tz_name: str) -> None:
         videos: list[tuple[Path, Path | None]] = []
@@ -629,7 +632,7 @@ class Supervisor:
             if segment.file_removed:
                 continue
             for relative in comment_text_relatives(segment.file_path):
-                self._unlink_file(relative)
+                unlink_stored(root, relative)
             try:
                 video = resolve_stored(root, segment.file_path)
             except ValueError:
@@ -638,7 +641,7 @@ class Supervisor:
         jobs = await repo.comment_jobs_for_session(session_id)
         for job in jobs:
             if job.export_path:
-                self._unlink_file(job.export_path)
+                unlink_stored(root, job.export_path)
                 job.export_path = None
         if await repo.comment_count(session_id) and jobs:
             await _auto_export(self.settings, repo, session_id, jobs[-1], tz_name)
@@ -651,28 +654,6 @@ class Supervisor:
                 )
             except Exception:
                 log.exception("combined ass failed")
-
-    def _unlink_file(self, relative: str) -> None:
-        try:
-            path = resolve_stored(self.settings.recordings_dir, relative)
-        except ValueError:
-            return
-        if path.is_file():
-            path.unlink()
-
-    def _unlink_recorded(self, relative: str, speech_relative: str | None = None) -> None:
-        try:
-            path = resolve_stored(self.settings.recordings_dir, relative)
-        except ValueError:
-            return
-        if path.is_file():
-            path.unlink()
-        unlink_speech_sidecar(path)
-        if speech_relative:
-            self._unlink_file(speech_relative)
-        for sidecar in comment_sidecar_relatives(relative):
-            self._unlink_file(sidecar)
-        unlink_combined_ass(path)
 
     async def _event(self, event_type: str, message: str, *, severity: str) -> None:
         async with self.db.session() as session:

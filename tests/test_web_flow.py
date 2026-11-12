@@ -300,6 +300,30 @@ def test_recording_history_delete_keeps_database_constraints(client):
     assert "テスト配信" not in client.get("/recordings").text
 
 
+def test_delete_files_retries_after_unlink_failure(client):
+    from live_recorder.recording.cleanup import flush_pending_deletions
+
+    token = _login(client)
+    session_id = client.ids["session"]
+    asyncio.run(_finish_jobs(client.settings, session_id))
+    media = client.settings.recordings_dir / "tiktok" / "live_user" / "seg1.mp4"
+    parent = media.parent
+    parent.chmod(0o555)
+    try:
+        removed = client.post(
+            f"/recordings/{session_id}/delete-files",
+            data={"csrf": token, "confirm": "yes"},
+            follow_redirects=False,
+        )
+        assert removed.status_code == 303
+        assert media.is_file()
+    finally:
+        parent.chmod(0o755)
+    assert client.get(f"/recordings/segments/{client.ids['segment']}/download").status_code == 404
+    asyncio.run(flush_pending_deletions(Database(client.settings), client.settings.recordings_dir))
+    assert not media.exists()
+
+
 def test_streamer_order_switches_between_name_and_custom(client):
     token = _login(client)
     for account, name in (("aiu.sort", "あいう"), ("kakiku.sort", "かきく")):

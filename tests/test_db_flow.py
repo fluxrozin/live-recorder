@@ -620,3 +620,70 @@ async def test_comment_retention_and_history_delete_do_not_deadlock(tmp_path, mo
     async with db.session() as session:
         assert await Repository(session).get_session(session_id) is None
     await db.dispose()
+
+
+async def test_pending_file_deletion_retries_after_unlink_failure(tmp_path, monkeypatch):
+    from live_recorder.recording.cleanup import flush_pending_deletions
+
+    db, _session_id, _job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    settings = _settings(tmp_path)
+    video = tmp_path / "rec" / _UNTITLED
+    parent = video.parent
+    async with db.session() as session:
+        repo = Repository(session)
+        segment = await repo.get_segment(segment_id)
+        await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
+        segment.file_removed = True
+        await session.commit()
+    parent.chmod(0o555)
+    try:
+        assert await flush_pending_deletions(db, settings.recordings_dir) == 0
+        assert video.is_file()
+        async with db.session() as session:
+            assert len(await Repository(session).pending_file_deletions()) == 1
+    finally:
+        parent.chmod(0o755)
+    assert await flush_pending_deletions(db, settings.recordings_dir) == 1
+    assert not video.exists()
+    async with db.session() as session:
+        assert await Repository(session).pending_file_deletions() == []
+        segment = await Repository(session).get_segment(segment_id)
+        assert segment.file_removed is True
+    await db.dispose()
+
+
+async def test_reconcile_retitles_follows_db_paths(tmp_path, monkeypatch):
+    from live_recorder.monitor.jobs import _reconcile_retitles
+    from live_recorder.recording.files import relative_to_root
+    from live_recorder.recording.retitle import stage_retitle
+
+    db, _session_id, _job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    settings = _settings(tmp_path)
+    root = settings.recordings_dir
+    source = root / _UNTITLED
+    staged = stage_retitle(source, "公開")
+    assert staged is not None
+    async with db.session() as session:
+        segment = await Repository(session).get_segment(segment_id)
+        segment.file_path = relative_to_root(root, staged.dest)
+        await session.commit()
+    pending = [staged]
+    await _reconcile_retitles(db, root, pending)
+    assert pending == []
+    assert staged.dest.is_file()
+    assert not source.exists()
+
+    restored = root / _UNTITLED
+    restored.write_bytes(b"video")
+    staged_again = stage_retitle(restored, "公開")
+    assert staged_again is not None
+    async with db.session() as session:
+        segment = await Repository(session).get_segment(segment_id)
+        segment.file_path = _UNTITLED
+        await session.commit()
+    pending = [staged_again]
+    await _reconcile_retitles(db, root, pending)
+    assert pending == []
+    assert restored.is_file()
+    assert not staged_again.dest.exists()
+    await db.dispose()

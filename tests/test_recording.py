@@ -896,7 +896,7 @@ async def test_tiktok_holds_comments_until_each_connection_is_checked(monkeypatc
     assert sink.items == ["r1-early", "r1-late"]
 
 
-async def test_tiktok_room_check_failure_does_not_drop_comments(monkeypatch):
+async def test_tiktok_room_check_failure_keeps_unverified_comments_out(monkeypatch):
     import asyncio
 
     from live_recorder.monitor.jobs import _collect_tiktok
@@ -904,17 +904,22 @@ async def test_tiktok_room_check_failure_does_not_drop_comments(monkeypatch):
     _fake_tiktok(monkeypatch, ["r1", "r1"])
     stop = asyncio.Event()
     sink = _TikTokSink()
+    sink.max_reconnects = 0
+    gaps: list[str] = []
 
     async def on_room(_room_id, _info):
-        if sink.items:
-            stop.set()
         raise RuntimeError("db down")
 
+    async def on_unverified(reason: str) -> None:
+        gaps.append(reason)
+
     outcome = await asyncio.wait_for(
-        _collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks()), 2
+        _collect_tiktok("someone", stop, sink, "", on_room, _LiveChecks(), on_unverified),
+        2,
     )
-    assert outcome == "stopped"
-    assert sink.items[:2] == ["r1-early", "r1-late"]
+    assert outcome != "ended"
+    assert sink.items == []
+    assert gaps == ["room_check_failed"]
 
 
 async def test_collect_twitcasting_backfills_without_a_tight_loop():

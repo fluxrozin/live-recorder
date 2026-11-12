@@ -16,7 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from live_recorder import __version__
 from live_recorder.cli import verify_password
-from live_recorder.comments.ass import probe_display_size, refresh_combined_ass, unlink_combined_ass
+from live_recorder.comments.ass import probe_display_size, refresh_combined_ass
 from live_recorder.comments.export import encode_export, export_row
 from live_recorder.comments.segments import (
     ExportSegment,
@@ -54,16 +54,12 @@ from live_recorder.platforms.normalize import (
     tiktok_profile_url,
     twitcasting_profile_url,
 )
+from live_recorder.recording.cleanup import flush_pending_deletions
 from live_recorder.recording.files import PathEscape, resolve_stored
 from live_recorder.recording.integrity import scan_storage
 from live_recorder.recording.process import command_output
 from live_recorder.speech.queue import requeue_speech
-from live_recorder.speech.srt import (
-    read_speech_cues,
-    speech_srt_path,
-    stored_speech_srt,
-    unlink_speech_sidecar,
-)
+from live_recorder.speech.srt import read_speech_cues, stored_speech_srt
 from live_recorder.timeutil import (
     ensure_aware,
     format_local,
@@ -934,7 +930,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             flash(request, "ファイル削除の確認が必要です", "warning")
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
         root = request.app.state.settings.recordings_dir
-        pending: list[tuple[Path, str | None]] = []
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             if await repo.deletion_blocked(session_id):
@@ -944,18 +939,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if segment.file_removed:
                     continue
                 try:
-                    path = resolve_stored(root, segment.file_path)
+                    resolve_stored(root, segment.file_path)
                 except PathEscape:
                     continue
-                pending.append((path, segment.speech_srt_path))
+                await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
                 segment.file_removed = True
             await repo.add_event("file_deleted", "録画ファイルを削除しました", session_id=session_id)
             await session.commit()
-        for path, speech_relative in pending:
-            if path.is_file():
-                path.unlink()
-            _unlink_comment_sidecars(path)
-            _unlink_speech_files(root, path, speech_relative)
+        await flush_pending_deletions(request.app.state.db, root)
         flash(request, "録画ファイルを削除しました。履歴は残しています")
         return RedirectResponse(f"/recordings/{session_id}", status_code=303)
 
@@ -971,8 +962,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(f"/recordings/{session_id}", status_code=303)
         delete_files_too = form.get("delete_files") == "yes"
         root = request.app.state.settings.recordings_dir
-        pending_videos: list[tuple[Path, str | None]] = []
-        pending_exports: list[Path] = []
         async with request.app.state.db.session() as session:
             repo = Repository(session)
             if await repo.deletion_blocked(session_id):
@@ -983,27 +972,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404)
             for segment in await repo.segments_for_session(session_id):
                 try:
-                    path = resolve_stored(root, segment.file_path)
+                    resolve_stored(root, segment.file_path)
                 except PathEscape:
                     continue
-                pending_videos.append((path, segment.speech_srt_path if delete_files_too else None))
+                if delete_files_too:
+                    await repo.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
+                else:
+                    for relative in comment_sidecar_relatives(segment.file_path):
+                        await repo.enqueue_file_deletion(relative, kind="file")
             comment_job = await repo.latest_comment_job(session_id)
             if comment_job and comment_job.export_path:
                 try:
-                    pending_exports.append(resolve_stored(root, comment_job.export_path))
+                    resolve_stored(root, comment_job.export_path)
                 except PathEscape:
                     pass
+                else:
+                    await repo.enqueue_file_deletion(comment_job.export_path, kind="file")
             await repo.delete_session(session_id)
             await session.commit()
-        for path, speech_relative in pending_videos:
-            if delete_files_too and path.is_file():
-                path.unlink()
-            if delete_files_too:
-                _unlink_speech_files(root, path, speech_relative)
-            _unlink_comment_sidecars(path)
-        for path in pending_exports:
-            if path.is_file():
-                path.unlink()
+        await flush_pending_deletions(request.app.state.db, root)
         flash(request, "履歴を削除しました")
         return RedirectResponse("/recordings", status_code=303)
 
@@ -1447,26 +1434,6 @@ def _comment_download(comments, windows, selected: int | None, tz: str) -> tuple
             payload, _media = encode_export(rows)
             archive.writestr(name, payload)
     return buffer.getvalue(), "application/zip", "comments.zip"
-
-
-def _unlink_speech_files(root: Path, video: Path, srt_relative: str | None) -> None:
-    unlink_speech_sidecar(video)
-    unlink_combined_ass(video)
-    if not srt_relative:
-        return
-    try:
-        extra = resolve_stored(root, srt_relative)
-    except PathEscape:
-        return
-    if extra.is_file() and extra != speech_srt_path(video):
-        extra.unlink()
-
-
-def _unlink_comment_sidecars(video: Path) -> None:
-    for relative in comment_sidecar_relatives(video.name):
-        extra = video.with_name(Path(relative).name)
-        if extra.is_file():
-            extra.unlink()
 
 
 def _scope_comments_to_session(query: dict) -> None:

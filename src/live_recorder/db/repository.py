@@ -13,6 +13,7 @@ from live_recorder.db.models import (
     CollectionGap,
     Comment,
     CommentCollectionJob,
+    PendingFileDeletion,
     RecorderEngine,
     RecordingJob,
     RecordingSegment,
@@ -849,6 +850,60 @@ class Repository:
             return None
         await self.session.delete(row)
         return row
+
+    async def enqueue_file_deletion(
+        self, file_path: str, speech_srt_path: str | None = None, *, kind: str = "video"
+    ) -> None:
+        """同じパスは1行にまとめる。履歴削除後も再試行できるようにする。"""
+        stmt = pg_insert(PendingFileDeletion).values(
+            file_path=file_path, speech_srt_path=speech_srt_path, kind=kind
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_pending_file_deletions_path",
+            set_={
+                "speech_srt_path": func.coalesce(stmt.excluded.speech_srt_path, PendingFileDeletion.speech_srt_path),
+                "kind": stmt.excluded.kind,
+            },
+        )
+        await self.session.execute(stmt)
+
+    async def pending_file_deletions(self) -> list[PendingFileDeletion]:
+        result = await self.session.scalars(select(PendingFileDeletion).order_by(PendingFileDeletion.id))
+        return list(result)
+
+    async def clear_pending_file_deletion(self, deletion_id: int) -> None:
+        row = await self.session.get(PendingFileDeletion, deletion_id)
+        if row is not None:
+            await self.session.delete(row)
+
+    async def enqueue_removed_segments(self) -> int:
+        """画面上は削除済みだが実ファイル待ちのセグメントをキューへ戻す。"""
+        segments = await self.session.scalars(
+            select(RecordingSegment).where(RecordingSegment.file_removed.is_(True))
+        )
+        count = 0
+        for segment in segments:
+            await self.enqueue_file_deletion(segment.file_path, segment.speech_srt_path, kind="video")
+            count += 1
+        return count
+
+    async def recorded_path_refs(self) -> set[str]:
+        """改名の照合用。DB が指している録画・字幕・書き出しパス。"""
+        paths: set[str] = set()
+        for value in await self.session.scalars(select(RecordingSegment.file_path)):
+            if value:
+                paths.add(value)
+        for value in await self.session.scalars(
+            select(RecordingSegment.speech_srt_path).where(RecordingSegment.speech_srt_path.is_not(None))
+        ):
+            if value:
+                paths.add(value)
+        for value in await self.session.scalars(
+            select(CommentCollectionJob.export_path).where(CommentCollectionJob.export_path.is_not(None))
+        ):
+            if value:
+                paths.add(value)
+        return paths
 
     async def stored_files(self) -> list[RecordingSegment]:
         result = await self.session.scalars(select(RecordingSegment).where(RecordingSegment.file_removed.is_(False)))

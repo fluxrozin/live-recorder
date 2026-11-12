@@ -44,7 +44,12 @@ from live_recorder.recording.commands import (
     streamlink_twitcasting_args,
     ytdlp_args,
 )
-from live_recorder.recording.files import build_segment_path, relative_to_root, resolve_stored
+from live_recorder.recording.files import (
+    PathEscape,
+    build_segment_path,
+    relative_to_root,
+    resolve_stored,
+)
 from live_recorder.recording.finalize import discard_obsolete, finalize_recording
 from live_recorder.recording.policy import (
     ACCESS_DENIED,
@@ -511,20 +516,33 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             await repo.add_event(event, f"録画を {target.value} で終了", severity=severity, session_id=session_id)
             await _commit_and_publish(session, open_retitles)
         if stamp_recording:
-            await _stamp_last_recording(db, session_id)
+            try:
+                await _stamp_last_recording(db, session_id)
+            except Exception:
+                log.exception("last recording stamp failed for session %s", session_id)
     except Exception:
-        _release_retitles(open_retitles, publish=False)
         log.exception("recording job %s crashed", job_id)
+        await _reconcile_retitles(db, settings.recordings_dir, open_retitles)
         async with db.session() as session:
             repo = Repository(session)
             job = await repo.get_recording_job(job_id)
-            if job is not None:
+            if job is not None and job.status not in {
+                RecordingStatus.COMPLETED.value,
+                RecordingStatus.PARTIAL.value,
+                RecordingStatus.CANCELLED.value,
+                RecordingStatus.FAILED.value,
+            }:
                 repo.finish_recording(job, RecordingStatus.FAILED, "runner crashed")
                 await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
-                await repo.add_event("recording_failed", "録画処理が異常終了しました", severity="error", session_id=job.stream_session_id)
+                await repo.add_event(
+                    "recording_failed",
+                    "録画処理が異常終了しました",
+                    severity="error",
+                    session_id=job.stream_session_id,
+                )
                 await session.commit()
     finally:
-        _release_retitles(open_retitles, publish=False)
+        await _reconcile_retitles(db, settings.recordings_dir, open_retitles)
         watcher.cancel()
 
 
@@ -632,6 +650,7 @@ async def _collect_tiktok(
     sign_api_key: str,
     on_room,
     checks: TikTokChecks,
+    on_unverified=None,
 ) -> str:
     if sign_api_key:
         os.environ["SIGN_API_KEY"] = sign_api_key
@@ -655,18 +674,34 @@ async def _collect_tiktok(
         except Exception:
             log.exception("tiktok room check failed for %s", user_id)
             matched = None
+        disconnect = False
         async with gate:
             if started != attempt:
                 return
-            if matched is False:
+            if matched is True:
+                room_open = True
+                pending = list(held)
                 held.clear()
+                for draft in pending:
+                    await sink.add(draft)
+                return
+            # 不一致は打ち切り。照合不能はゲートを開けず再接続する（未確認コメントは入れない）。
+            held.clear()
+            if matched is False:
                 stop.set()
                 return
-            room_open = True
-            pending = list(held)
-            held.clear()
-            for draft in pending:
-                await sink.add(draft)
+            sink.reconnects += 1
+            disconnect = True
+        if disconnect:
+            if on_unverified is not None:
+                try:
+                    await on_unverified("room_check_failed")
+                except Exception:
+                    log.exception("tiktok room check gap failed for %s", user_id)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
     @client.on(CommentEvent)
     async def on_comment(event: object) -> None:
@@ -675,7 +710,8 @@ async def _collect_tiktok(
             return
         async with gate:
             if not room_open:
-                held.append(draft)
+                if len(held) < 500:
+                    held.append(draft)
                 return
         await sink.add(draft)
 
@@ -825,6 +861,14 @@ async def run_comment_job(
                 repo.move_comments(job, CommentJobStatus.COLLECTING)
                 await repo.close_open_gaps(session_id, "comments", utcnow())
                 await session.commit()
+        async def mark_gap(reason: str) -> None:
+            async with db.session() as session:
+                repo = Repository(session)
+                stream = await repo.get_session(session_id)
+                started = stream.detected_at if stream else utcnow()
+                await repo.add_gap(session_id, "comments", started, utcnow(), reason)
+                await session.commit()
+
         if platform == "tiktok":
             outcome = await _collect_tiktok(
                 user_id,
@@ -833,6 +877,7 @@ async def run_comment_job(
                 settings.sign_api_key,
                 lambda room_id, info: _remember_room(db, session_id, room_id, info),
                 tiktok_checks,
+                on_unverified=mark_gap,
             )
         else:
             if not movie_id:
@@ -845,14 +890,6 @@ async def run_comment_job(
             elif obs_restricted(await tc.current_live(user_id)):
                 outcome = "access_denied"
             else:
-                async def mark_gap(reason: str) -> None:
-                    async with db.session() as session:
-                        repo = Repository(session)
-                        stream = await repo.get_session(session_id)
-                        started = stream.detected_at if stream else utcnow()
-                        await repo.add_gap(session_id, "comments", started, utcnow(), reason)
-                        await session.commit()
-
                 outcome = await _collect_twitcasting(
                     tc, movie_id, stop, sink, runtime.comment_poll_seconds, mark_gap
                 )
@@ -1023,6 +1060,33 @@ def _release_retitles(staged: list[StagedRetitle], *, publish: bool) -> None:
     staged.clear()
 
 
+async def _reconcile_retitles(db: Database, root: Path, staged: list[StagedRetitle]) -> None:
+    """コミット成否が不明なとき、DB の参照先を見て公開か取り消しを決める。照合不能なら両方残す。"""
+    if not staged:
+        return
+    pending = list(staged)
+    staged.clear()
+    try:
+        async with db.session() as session:
+            refs = await Repository(session).recorded_path_refs()
+    except Exception:
+        log.exception("retitle reconcile lookup failed; keeping both names")
+        return
+    for item in pending:
+        try:
+            dest_rel = relative_to_root(root, item.dest)
+            source_rel = relative_to_root(root, item.source)
+        except PathEscape:
+            log.exception("retitle reconcile path failed for %s", item.dest)
+            continue
+        if dest_rel in refs:
+            publish_retitle(item)
+        elif source_rel in refs:
+            rollback_retitle(item)
+        else:
+            log.warning("retitle ambiguous for %s / %s; keeping both", source_rel, dest_rel)
+
+
 async def _commit_and_publish(session, staged: list[StagedRetitle]) -> None:
     """DB が新しいパスを指したら、すぐ古い名前を消す。コミット後に取り消さない。"""
     await session.commit()
@@ -1175,7 +1239,7 @@ async def close_recording_if_idle(
                 await repo.close_open_gaps(job.stream_session_id, "recording", utcnow())
             await _commit_and_publish(session, open_retitles)
     except BaseException:
-        _release_retitles(open_retitles, publish=False)
+        await _reconcile_retitles(db, settings.recordings_dir, open_retitles)
         raise
     for path in obsolete:
         discard_obsolete(path)

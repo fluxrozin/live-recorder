@@ -280,3 +280,16 @@ class WorkerHeartbeat(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32))
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+class PendingFileDeletion(Base):
+    """DB 確定後に消す録画・副ファイル。unlink 失敗後も再試行できる。"""
+
+    __tablename__ = "pending_file_deletions"
+    __table_args__ = (UniqueConstraint("file_path", name="uq_pending_file_deletions_path"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    file_path: Mapped[str] = mapped_column(String(500))
+    speech_srt_path: Mapped[str | None] = mapped_column(String(500))
+    kind: Mapped[str] = mapped_column(String(16), default="video", server_default="video")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
