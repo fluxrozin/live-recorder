@@ -458,6 +458,104 @@ async def test_closing_retitles_a_pending_segment_and_drops_the_old_name(tmp_pat
     await db.dispose()
 
 
+async def test_recording_finish_and_monitor_apply_do_not_deadlock(tmp_path, monkeypatch):
+    from live_recorder.monitor.jobs import _stamp_last_recording
+
+    db, session_id, _job_id, _segment_id = await _recording(tmp_path, monkeypatch)
+    mid = asyncio.Event()
+    gate = asyncio.Event()
+    results: dict[str, object] = {}
+
+    async def finish_recording():
+        try:
+            mid.set()
+            await gate.wait()
+            # 監視が配信行を持ったままでも、streamer だけの更新は通る。
+            await asyncio.wait_for(_stamp_last_recording(db, session_id), 5)
+            results["finish"] = "ok"
+        except Exception as exc:
+            results["finish"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+    async def apply_tick():
+        try:
+            await mid.wait()
+            async with db.session() as session:
+                repo = Repository(session)
+                streamer_id = (await repo.get_session(session_id)).streamer_id
+                open_session = await repo.open_session(streamer_id)
+                if open_session is not None:
+                    open_session = await repo.lock_session(open_session.id)
+                gate.set()
+                await asyncio.sleep(0.1)
+                streamer = await repo.get_streamer(streamer_id)
+                streamer.last_checked_at = datetime.now(timezone.utc)
+                if open_session is not None:
+                    open_session.last_seen_live_at = datetime.now(timezone.utc)
+                await asyncio.wait_for(session.commit(), 5)
+                results["apply"] = "ok"
+        except Exception as exc:
+            results["apply"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+    await asyncio.wait_for(asyncio.gather(finish_recording(), apply_tick()), 10)
+    assert results["finish"] == "ok"
+    assert results["apply"] == "ok"
+    assert "deadlock" not in str(results).lower()
+    async with db.session() as session:
+        stream = await Repository(session).get_session(session_id)
+        assert stream.streamer.last_recording_at is not None
+    await db.dispose()
+
+
+async def test_close_recording_and_history_delete_do_not_deadlock(tmp_path, monkeypatch):
+    from live_recorder.recording.finalize import FinalFile
+
+    db, session_id, job_id, segment_id = await _recording(tmp_path, monkeypatch)
+    settings = _settings(tmp_path)
+    async with db.session() as session:
+        segment = await Repository(session).get_segment(segment_id)
+        segment.finished_at = None
+        segment.validation_status = "pending"
+        await session.commit()
+
+    async def slow_finalize(_ffmpeg, _ffprobe, path):
+        await asyncio.sleep(0.15)
+        return FinalFile(path, "mp4", 1000, path.stat().st_size, "ok", True)
+
+    monkeypatch.setattr("live_recorder.monitor.jobs.finalize_recording", slow_finalize)
+    results: dict[str, object] = {}
+
+    async def close_job():
+        try:
+            await close_recording_if_idle(
+                settings, db, job_id, RecordingStatus.PARTIAL, finish=False
+            )
+            results["close"] = "ok"
+        except Exception as exc:
+            results["close"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+    async def delete_history():
+        try:
+            await asyncio.sleep(0.05)
+            async with db.session() as session:
+                repo = Repository(session)
+                assert await asyncio.wait_for(repo.lock_session(session_id), 5) is not None
+                await asyncio.wait_for(repo.delete_session(session_id), 5)
+                await asyncio.wait_for(session.commit(), 5)
+                results["delete"] = "ok"
+        except Exception as exc:
+            results["delete"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+
+    await asyncio.wait_for(asyncio.gather(close_job(), delete_history()), 10)
+    assert results["close"] == "ok"
+    assert results["delete"] == "ok"
+    assert "deadlock" not in str(results).lower()
+    # 履歴は消えても、コミット前にファイルを消していないので実体は残る。
+    assert any((tmp_path / "rec").glob("*.mp4"))
+    async with db.session() as session:
+        assert await Repository(session).get_session(session_id) is None
+    await db.dispose()
+
+
 async def test_comment_retention_and_history_delete_do_not_deadlock(tmp_path, monkeypatch):
     from sqlalchemy import text
 

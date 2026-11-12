@@ -389,6 +389,8 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             async with db.session() as session:
                 repo = Repository(session)
                 job = await repo.get_recording_job(job_id)
+                # 配信行を先にロックしてからセグメントを更新する。削除と逆順にならないようにする。
+                current = await repo.lock_session(session_id)
                 if opened and not drop_segment and final_path is not None:
                     segment = await session.get(
                         __import__("live_recorder.db.models", fromlist=["RecordingSegment"]).RecordingSegment,
@@ -407,7 +409,6 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                             enabled=speech_runtime.speech_subtitles_enabled,
                             has_media=has_media,
                         )
-                    current = await repo.lock_session(session_id)
                     if current is not None and current.title:
                         await _retitle_finished_segments(
                             repo, settings.recordings_dir, session_id, job_id, current.title, open_retitles
@@ -467,6 +468,7 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
                     pass
                 continue
             break
+        stamp_recording = False
         async with db.session() as session:
             repo = Repository(session)
             job = await repo.get_recording_job(job_id)
@@ -503,12 +505,13 @@ async def run_recording_job(settings: Settings, db: Database, tc: TwitCastingCli
             )
             await repo.close_open_gaps(session_id, "recording", utcnow())
             repo.finish_recording(job, target, None if target == RecordingStatus.COMPLETED else saw_failure)
-            if stream is not None and has_media:
-                stream.streamer.last_recording_at = utcnow()
+            stamp_recording = stream is not None and has_media
             severity = "info" if target in {RecordingStatus.COMPLETED, RecordingStatus.CANCELLED, RecordingStatus.PARTIAL} else "error"
             event = "recording_finished" if target != RecordingStatus.FAILED else "recording_failed"
             await repo.add_event(event, f"録画を {target.value} で終了", severity=severity, session_id=session_id)
             await _commit_and_publish(session, open_retitles)
+        if stamp_recording:
+            await _stamp_last_recording(db, session_id)
     except Exception:
         _release_retitles(open_retitles, publish=False)
         log.exception("recording job %s crashed", job_id)
@@ -1030,6 +1033,16 @@ async def _commit_and_publish(session, staged: list[StagedRetitle]) -> None:
         publish_retitle(item)
 
 
+async def _stamp_last_recording(db: Database, session_id: int) -> None:
+    """配信行ロックと別に最終録画時刻を残す。監視の streamer 更新とデッドロックしない。"""
+    async with db.session() as session:
+        stream = await Repository(session).get_session(session_id)
+        if stream is None or stream.streamer is None:
+            return
+        stream.streamer.last_recording_at = utcnow()
+        await session.commit()
+
+
 async def _stage_retitle(path: Path, title: str | None, sink: list[StagedRetitle]) -> StagedRetitle | None:
     """付け直しを別スレッドで行う。キャンセルされても作成物を sink に残す。"""
     box: list[StagedRetitle | None] = [None]
@@ -1108,10 +1121,13 @@ async def close_recording_if_idle(
             job = await repo.get_recording_job(job_id)
             if job is None:
                 return
+            # 配信行を先にロックしてからセグメントを更新する。履歴削除とデッドロックしない。
+            stream = await repo.lock_session(job.stream_session_id)
+            if stream is None:
+                return
             speech_enabled = (await load_runtime(session)).speech_subtitles_enabled
-            stream = await repo.get_session(job.stream_session_id)
-            title = stream.title if stream else None
-            for segment in await repo.segments_for_job(job_id):
+            title = stream.title
+            for segment in await repo.lock_segments_for_job(job_id):
                 if segment.finished_at is not None or segment.file_removed:
                     continue
                 has_media = False
@@ -1145,7 +1161,6 @@ async def close_recording_if_idle(
                 segment.finished_at = utcnow()
                 assign_speech_queue(segment, enabled=speech_enabled, has_media=has_media)
             if title:
-                await repo.lock_session(job.stream_session_id)
                 await _retitle_finished_segments(
                     repo, settings.recordings_dir, job.stream_session_id, job_id, title, open_retitles
                 )

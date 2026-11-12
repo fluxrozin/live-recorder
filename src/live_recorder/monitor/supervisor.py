@@ -340,12 +340,16 @@ class Supervisor:
             streamer = await repo.get_streamer(streamer_id)
             if streamer is None:
                 return
+            # 配信行があるときは先にロックしてから streamer を更新する。
+            # 録画終了が session→streamer の順でもデッドロックしない。
+            open_session = await repo.open_session(streamer_id)
+            if open_session is not None:
+                open_session = await repo.lock_session(open_session.id)
             streamer.live_status = plan.live_status
             streamer.last_checked_at = utcnow()
             streamer.last_error = observation.error
             if observation.status == LiveStatus.LIVE:
                 streamer.last_live_at = utcnow()
-            open_session = await repo.open_session(streamer_id)
             if plan.session in {"end", "replace"} and open_session is not None:
                 idle, extra = await self._end_session(
                     repo,
