@@ -32,9 +32,9 @@ docker compose exec app python -m live_recorder.cli create-admin
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1
 ```
 
-ビルドする Windows には .NET 10 以降の SDK が必要です。できあがるアプリの対象は .NET 10 です。exe はランタイムを同梱した単一ファイルなので、動かす PC へ .NET を別に入れる必要はありません。以前の .NET Framework 版よりファイルは大きくなります。
+ビルドする Windows には Qt 6.2 以降の Widgets、Network、Concurrent と、CMake 3.21 以降、それにキットに合うコンパイラが必要です。MSVC 版の Qt なら Visual Studio 2022 の「C++ によるデスクトップ開発」、MinGW 版なら Qt に付く MinGW と Ninja です。`build.ps1` は `qtpaths` と `C:\Qt` から Qt 6 を探します。場所を指定するときは `-QtPrefix` か環境変数 `QT_PREFIX` を使います。
 
-`windows\tray\build` に `LiveRecorderTray.exe` ができます。このフォルダを Windows 側の任意の場所へ置きます。プロジェクトのファイルと `.env` は WSL 内の `project` に残します。
+`windows\tray\build` に `LiveRecorderTray.exe` と、Qt の DLL、`platforms`、`imageformats`、`translations` ができます。動かす PC へ Qt を入れる必要はありません。このフォルダを Windows 側の任意の場所へ置きます。`windows\tray\.cache` は再ビルド用の中間ファイルです。プロジェクトのファイルと `.env` は WSL 内の `project` に残します。
 
 exe と同じフォルダへ [windows/tray/tray.example.json](windows/tray/tray.example.json) を `tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。
 

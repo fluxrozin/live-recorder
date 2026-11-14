@@ -13,6 +13,7 @@ obj/
 
 # Local runtime
 .env
+windows/tray/.cache/
 data/
 *.log
 .pytest_cache/
