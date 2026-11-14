@@ -38,7 +38,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1
 
 インストールは、`build` の中身をフォルダごと、Windows 上の任意の場所へコピーすることです。exe だけを取り出しても起動しません。DLL と `platforms` などの位置関係を保ったまま置きます。中にはこのトレイが使わないプラグインもあります。削らずにフォルダごと置くのが確実です。
 
-コピー先の exe と同じフォルダへ [windows/tray/tray.example.json](windows/tray/tray.example.json) を `tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。
+[windows/tray/tray.example.json](windows/tray/tray.example.json) を `windows\tray\tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。`tray.json` はビルドのたびに `windows\tray\build` へコピーされます。無いときはビルドは成功し、`build` には入りません。
 
 `LiveRecorderTray.exe` には発行元の署名がありません。起動時に SmartScreen が「Windows によって PC が保護されました」と出すことがあります。プロパティ下部に「許可する」があればオンにします。ダイアログでは「詳細情報」を開き、「実行」を選びます。同じ exe では、その後は表示されません。
 

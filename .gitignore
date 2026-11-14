@@ -13,6 +13,7 @@ obj/
 
 # Local runtime
 .env
+windows/tray/tray.json
 windows/tray/.cache/
 data/
 *.log

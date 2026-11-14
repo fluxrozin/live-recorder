@@ -171,6 +171,18 @@ if (-not (Test-Path $built)) {
 }
 if (-not (Test-Path $built)) { throw "build output not found" }
 
+# windows\tray\tray.json is the local config. The publish folder is replaced
+# below, so keep an existing build\tray.json when the source file is absent.
+$traySource = Join-Path $here "tray.json"
+$trayPublish = Join-Path $publish "tray.json"
+$trayHeld = $null
+if (Test-Path $traySource) {
+    $trayHeld = $traySource
+} elseif (Test-Path $trayPublish) {
+    $trayHeld = Join-Path $cache "tray.json"
+    Copy-Item $trayPublish $trayHeld -Force
+}
+
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Copy-Item $built (Join-Path $out "LiveRecorderTray.exe")
@@ -194,5 +206,8 @@ if (Test-Path $imageFormats) {
 if ($onUnc) {
     if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
     Copy-Item $out $publish -Recurse -Force
+}
+if ($trayHeld) {
+    Copy-Item $trayHeld (Join-Path $publish "tray.json") -Force
 }
 Write-Output "built $publish\LiveRecorderTray.exe"
