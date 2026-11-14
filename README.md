@@ -34,9 +34,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1
 
 ビルドする Windows には Qt 6.2 以降の Widgets、Network、Concurrent と、CMake 3.21 以降、それにキットに合うコンパイラが必要です。MSVC 版の Qt なら Visual Studio 2022 の「C++ によるデスクトップ開発」、MinGW 版なら Qt に付く MinGW と Ninja です。`build.ps1` は `qtpaths` と `C:\Qt` から Qt 6 を探します。場所を指定するときは `-QtPrefix` か環境変数 `QT_PREFIX` を使います。
 
-`windows\tray\build` に `LiveRecorderTray.exe` と、Qt の DLL、`platforms`、`imageformats`、`translations` ができます。動かす PC へ Qt を入れる必要はありません。このフォルダを Windows 側の任意の場所へ置きます。`windows\tray\.cache` は再ビルド用の中間ファイルです。プロジェクトのファイルと `.env` は WSL 内の `project` に残します。
+`windows\tray\build` に `LiveRecorderTray.exe` と、Qt の DLL、`platforms`、`imageformats`、`styles`、`translations` などができます。動かす PC へ Qt を入れる必要はありません。`windows\tray\.cache` は再ビルド用の中間ファイルなので、インストールには含めません。プロジェクトのファイルと `.env` は WSL 内の `project` に残します。
 
-exe と同じフォルダへ [windows/tray/tray.example.json](windows/tray/tray.example.json) を `tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。
+インストールは、`build` の中身をフォルダごと、Windows 上の任意の場所へコピーすることです。exe だけを取り出しても起動しません。DLL と `platforms` などの位置関係を保ったまま置きます。中にはこのトレイが使わないプラグインもあります。削らずにフォルダごと置くのが確実です。
+
+コピー先の exe と同じフォルダへ [windows/tray/tray.example.json](windows/tray/tray.example.json) を `tray.json` としてコピーし、`distro` と `project` を合わせます。`distro` は WSL のディストリビューション名、`project` はディストリビューション内のプロジェクトパスです。管理画面のポートは、そのディレクトリの `.env` にある `WEB_PORT` です。無いときや空のときは 8080 です。
 
 `LiveRecorderTray.exe` には発行元の署名がありません。起動時に SmartScreen が「Windows によって PC が保護されました」と出すことがあります。プロパティ下部に「許可する」があればオンにします。ダイアログでは「詳細情報」を開き、「実行」を選びます。同じ exe では、その後は表示されません。
 

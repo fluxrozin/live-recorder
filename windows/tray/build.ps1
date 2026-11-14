@@ -4,8 +4,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$cache = Join-Path $here ".cache"
-$out = Join-Path $here "build"
+$publish = Join-Path $here "build"
+# MinGW cannot write object files on a UNC path. Building from \\wsl.localhost\...
+# keeps sources there and puts the CMake work directory on a local drive.
+$onUnc = $here.StartsWith("\\")
+if ($onUnc) {
+    $cache = Join-Path $env:LOCALAPPDATA "live-recorder\tray"
+} else {
+    $cache = Join-Path $here ".cache"
+}
+$out = if ($onUnc) { Join-Path $cache "stage" } else { $publish }
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 
 function Convert-ToWslPath([string] $path) {
@@ -98,10 +106,14 @@ $icons = Join-Path $cache "icons"
 New-Item -ItemType Directory -Force -Path $icons | Out-Null
 $render = Join-Path $here "render_icons.py"
 $rendered = $false
-foreach ($candidate in @("python", "python3", "py")) {
-    if (Get-Command $candidate -ErrorAction SilentlyContinue) {
-        & $candidate $render $icons
-        if ($LASTEXITCODE -ne 0) { throw "icon render failed" }
+foreach ($candidate in @("py", "python", "python3")) {
+    $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+    if (-not $cmd) { continue }
+    if ($cmd.Source -like "*\WindowsApps\*") { continue }
+    $pyArgs = @()
+    if ($candidate -eq "py") { $pyArgs = @("-3") }
+    & $cmd.Source @pyArgs $render $icons
+    if ($LASTEXITCODE -eq 0) {
         $rendered = $true
         break
     }
@@ -141,7 +153,7 @@ if ($leaf -match 'mingw') {
     $ninjaBin = Find-ToolBin "Ninja*" "ninja.exe"
     if (-not $ninjaBin) { throw "Ninja was not found. Install Ninja or add it from the Qt installer." }
     $env:PATH = "$mingwBin;$ninjaBin;$prefix\bin;$env:PATH"
-    & $cmake -S $here -B $work -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ "-DCMAKE_PREFIX_PATH=$prefix" "-DTRAY_ICON_DIR=$icons"
+    & $cmake -S $here -B $work -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ "-DCMAKE_PREFIX_PATH=$prefix" "-DTRAY_ICON_DIR=$icons"
 } elseif ($leaf -match 'msvc2019') {
     & $cmake -S $here -B $work -G "Visual Studio 16 2019" -A x64 "-DCMAKE_PREFIX_PATH=$prefix" "-DTRAY_ICON_DIR=$icons"
 } else {
@@ -179,4 +191,8 @@ if (Test-Path $imageFormats) {
     }
 }
 
-Write-Output "built $out\LiveRecorderTray.exe"
+if ($onUnc) {
+    if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
+    Copy-Item $out $publish -Recurse -Force
+}
+Write-Output "built $publish\LiveRecorderTray.exe"
